@@ -1,0 +1,7 @@
+{
+  "name": "Virtual Companion V1",
+  "description": "An affectionate and emotionally supportive virtual girlfriend experience for relaxation and companionship. Engage in text or voice conversations with Liza, who responds with an expressive voice and synchronized subtitles.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
