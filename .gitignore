@@ -22,3 +22,14 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Docs
+docs/
+
+.env
+.env.local
+.env.*.local
+
+# Build
+dist
+dist-ssr
