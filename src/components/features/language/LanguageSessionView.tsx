@@ -7,7 +7,7 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { LizaLogo } from '@/components/shared/LizaLogo';
 import type { Message, LanguageSession } from '@/types';
 import { LANGUAGE_DATA } from '@/data/mockData';
-import { useAuth } from '@/context/AuthContext';
+import { useAuth } from '@/stores/authStore';
 
 interface LanguageSessionViewProps {
     session: LanguageSession | null;
@@ -16,10 +16,11 @@ interface LanguageSessionViewProps {
     setInput: (val: string) => void;
     onSend: () => void;
     onEndSession: () => void;
+    loading?: boolean;
 }
 
 export const LanguageSessionView: React.FC<LanguageSessionViewProps> = ({
-    session, messages, input, setInput, onSend, onEndSession
+    session, messages, input, setInput, onSend, onEndSession, loading = false
 }) => {
     const { user } = useAuth();
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -71,6 +72,20 @@ export const LanguageSessionView: React.FC<LanguageSessionViewProps> = ({
                             </div>
                         </div>
                     ))}
+                    {loading && (
+                        <div className="flex items-start gap-3">
+                            <div className="flex-shrink-0 mt-1">
+                                <LizaLogo size={32} className="rounded-full bg-blue-500/10 p-1" />
+                            </div>
+                            <div className="max-w-[80%] p-4 rounded-2xl bg-white/5 border border-white/10 text-gray-300 rounded-tl-none">
+                                <span className="inline-flex gap-1">
+                                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-bounce [animation-delay:-0.3s]" />
+                                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-bounce [animation-delay:-0.15s]" />
+                                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-bounce" />
+                                </span>
+                            </div>
+                        </div>
+                    )}
                     <div ref={scrollRef} />
                 </div>
             </ScrollArea>
@@ -84,14 +99,15 @@ export const LanguageSessionView: React.FC<LanguageSessionViewProps> = ({
                         <Input
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && onSend()}
+                            onKeyDown={(e) => e.key === 'Enter' && !loading && onSend()}
+                            disabled={loading}
                             placeholder={`Type your response in ${LANGUAGE_DATA[session.language].name}...`}
-                            className="w-full bg-white/5 border-white/10 text-white pr-10 focus-visible:ring-blue-500/50"
+                            className="w-full bg-white/5 border-white/10 text-white pr-10 focus-visible:ring-blue-500/50 disabled:opacity-60"
                         />
                     </div>
                     <Button
                         onClick={onSend}
-                        disabled={!input.trim()}
+                        disabled={!input.trim() || loading}
                         className="bg-gradient-to-r from-blue-500 to-teal-500 text-white shadow-lg shadow-blue-500/20"
                     >
                         <Send className="w-4 h-4" />

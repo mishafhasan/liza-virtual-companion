@@ -9,6 +9,7 @@ import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { generateAvatar } from '@/services/ai/avatarService';
 import type { Settings, CharacterProfile, MemoryItem, Language } from '@/types';
 
 interface SettingsPanelProps {
@@ -72,44 +73,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         setGenerationError('');
 
         try {
-            const apiKey = process.env.STABILITY_API_KEY;
-            if (!apiKey) {
-                setGenerationError('Please add STABILITY_API_KEY to your .env file. Get free API key from platform.stability.ai');
-                setIsGenerating(false);
-                return;
+            const rawImageUrl = await generateAvatar(avatarPrompt);
+            try {
+                const compressedUrl = await compressImage(rawImageUrl);
+                onCharacterProfileChange({ avatar: compressedUrl });
+            } catch {
+                onCharacterProfileChange({ avatar: rawImageUrl });
             }
-
-            const formData = new FormData();
-            formData.append('prompt', `professional portrait photo of a beautiful young woman, ${avatarPrompt}, centered face, high quality, detailed facial features, soft lighting, 8k resolution, photorealistic`);
-            formData.append('output_format', 'png');
-            formData.append('aspect_ratio', '1:1');
-
-            const response = await fetch('https://api.stability.ai/v2beta/stable-image/generate/core', {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${apiKey}`, 'Accept': 'image/*' },
-                body: formData,
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`API returned ${response.status}: ${errorText}`);
-            }
-
-            const blob = await response.blob();
-            const reader = new FileReader();
-            reader.onloadend = async () => {
-                const rawImageUrl = reader.result as string;
-                try {
-                    const compressedUrl = await compressImage(rawImageUrl);
-                    onCharacterProfileChange({ avatar: compressedUrl });
-                } catch {
-                    onCharacterProfileChange({ avatar: rawImageUrl });
-                }
-            };
-            reader.onerror = () => setGenerationError('Failed to process generated image.');
-            reader.readAsDataURL(blob);
         } catch (error: any) {
-            setGenerationError(`Failed to generate avatar: ${error?.message || 'Please check your API key'}`);
+            setGenerationError(error?.message || 'Failed to generate avatar. Please check your API key.');
         } finally {
             setIsGenerating(false);
         }

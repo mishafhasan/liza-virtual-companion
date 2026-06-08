@@ -1,11 +1,12 @@
-import React from 'react';
-import { ArrowRight, Upload, Building2 } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { ArrowRight, Upload, Building2, FileText, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Card } from '@/components/ui/card';
+import { toast } from 'sonner';
 import type { InterviewRole, InterviewDifficulty } from '@/types';
 
 interface InterviewSetupProps {
@@ -21,9 +22,14 @@ interface InterviewSetupProps {
     setCompanyName: (name: string) => void;
     jobDescription: string;
     setJobDescription: (desc: string) => void;
+    resumeText: string;
+    setResumeText: (text: string) => void;
     onStart: () => void;
     loading: boolean;
 }
+
+/** Max resume size we'll read client-side (256 KB of text is plenty). */
+const MAX_RESUME_BYTES = 256 * 1024;
 
 export const InterviewSetup: React.FC<InterviewSetupProps> = ({
     selectedRole, setSelectedRole,
@@ -32,8 +38,42 @@ export const InterviewSetup: React.FC<InterviewSetupProps> = ({
     interviewType, setInterviewType,
     companyName, setCompanyName,
     jobDescription, setJobDescription,
+    resumeText, setResumeText,
     onStart, loading
 }) => {
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const [resumeFileName, setResumeFileName] = useState('');
+
+    const handleResumeUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        const isText = file.type.startsWith('text/') || /\.(txt|md)$/i.test(file.name);
+        if (!isText) {
+            toast.error('Please upload a .txt or .md file, or paste your resume text below.');
+            return;
+        }
+        if (file.size > MAX_RESUME_BYTES) {
+            toast.error('Resume file is too large (max 256 KB).');
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = () => {
+            setResumeText(String(reader.result || ''));
+            setResumeFileName(file.name);
+            toast.success(`Loaded ${file.name}`);
+        };
+        reader.onerror = () => toast.error('Could not read that file.');
+        reader.readAsText(file);
+    };
+
+    const clearResume = () => {
+        setResumeText('');
+        setResumeFileName('');
+        if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
     return (
         <div className="max-w-4xl mx-auto py-8 px-6">
             <div className="text-center mb-10">
@@ -147,10 +187,44 @@ export const InterviewSetup: React.FC<InterviewSetupProps> = ({
                             />
                         </div>
 
-                        <div className="p-4 rounded-xl border border-dashed border-white/20 bg-white/[0.02] text-center">
-                            <Upload className="w-6 h-6 text-gray-400 mx-auto mb-2" />
-                            <p className="text-sm text-gray-300">Upload Resume (PDF/TXT)</p>
-                            <p className="text-xs text-gray-500 mt-1">Coming soon...</p>
+                        <div className="space-y-2">
+                            <Label className="text-gray-300">Resume</Label>
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept=".txt,.md,text/plain"
+                                onChange={handleResumeUpload}
+                                className="hidden"
+                            />
+                            {resumeText ? (
+                                <div className="flex items-center justify-between gap-2 p-3 rounded-xl border border-green-500/30 bg-green-500/10">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <FileText className="w-4 h-4 text-green-400 shrink-0" />
+                                        <span className="text-sm text-gray-200 truncate">
+                                            {resumeFileName || 'Resume text added'}
+                                        </span>
+                                    </div>
+                                    <button onClick={clearResume} className="text-gray-400 hover:text-red-400 shrink-0">
+                                        <X className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            ) : (
+                                <button
+                                    type="button"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className="w-full p-4 rounded-xl border border-dashed border-white/20 bg-white/[0.02] text-center hover:bg-white/[0.05] transition-colors"
+                                >
+                                    <Upload className="w-6 h-6 text-gray-400 mx-auto mb-2" />
+                                    <p className="text-sm text-gray-300">Upload Resume (.txt / .md)</p>
+                                    <p className="text-xs text-gray-500 mt-1">or paste the text below</p>
+                                </button>
+                            )}
+                            <Textarea
+                                value={resumeText}
+                                onChange={(e) => setResumeText(e.target.value)}
+                                placeholder="Paste your resume text here to tailor questions to your experience..."
+                                className="bg-white/5 border-white/10 text-white min-h-[80px]"
+                            />
                         </div>
                     </Card>
                 </div>
