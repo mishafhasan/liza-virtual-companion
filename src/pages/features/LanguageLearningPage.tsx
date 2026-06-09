@@ -14,6 +14,7 @@ export const LanguageLearningPage: React.FC = () => {
         input, setInput,
         messages,
         currentSession,
+        loading,
         startSession,
         sendMessage,
         endSession
@@ -46,6 +47,7 @@ export const LanguageLearningPage: React.FC = () => {
                 setInput={setInput}
                 onSend={sendMessage}
                 onEndSession={endSession}
+                loading={loading}
             />
         );
     }

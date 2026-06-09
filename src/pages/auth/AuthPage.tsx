@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { LogoDisplay } from '@/components/shared/LizaLogo';
-import { useAuth } from '@/context/AuthContext';
+import { useAuth } from '@/stores/authStore';
 
 export const AuthPage: React.FC = () => {
     const navigate = useNavigate();

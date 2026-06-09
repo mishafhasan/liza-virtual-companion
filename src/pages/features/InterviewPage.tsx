@@ -13,6 +13,7 @@ export const InterviewPage: React.FC = () => {
         interviewType, setInterviewType,
         companyName, setCompanyName,
         jobDescription, setJobDescription,
+        resumeText, setResumeText,
         input, setInput,
         currentSession,
         loading,
@@ -40,6 +41,8 @@ export const InterviewPage: React.FC = () => {
                     setCompanyName={setCompanyName}
                     jobDescription={jobDescription}
                     setJobDescription={setJobDescription}
+                    resumeText={resumeText}
+                    setResumeText={setResumeText}
                     onStart={startSession}
                     loading={loading}
                 />
