@@ -7,6 +7,7 @@ import {
     saveTurnPair,
     loadSessions,
     loadTurns,
+    retrieveRelevantMemories,
 } from '@/services/supabase/conversationService';
 import type { Conversation, Message, AIPersonality } from '@/types';
 
@@ -152,9 +153,18 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
                 content: m.content,
             }));
 
-            const systemInstruction = options?.systemInstructionOverride
+            // Fetch semantically relevant memories in parallel with AI call setup.
+            // Falls back to [] silently when Supabase is not configured.
+            const ragFacts = await retrieveRelevantMemories(content);
+
+            const baseInstruction = options?.systemInstructionOverride
                 ?? getPersonalityPrompt(personality) +
                    '\n\nKeep responses conversational and concise (1-3 paragraphs max).';
+
+            // Append RAG context block when there are relevant past memories.
+            const systemInstruction = ragFacts.length > 0
+                ? `${baseInstruction}\n\n**LONG-TERM MEMORY (from past conversations — use naturally, never robotically):**\n${ragFacts.map((f, i) => `${i + 1}. ${f}`).join('\n')}`
+                : baseInstruction;
 
             const aiText = (await generateChatReply({ systemInstruction, history }))
                 || "Sorry, I couldn't process that. Could you try again?";

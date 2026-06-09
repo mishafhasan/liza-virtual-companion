@@ -15,7 +15,7 @@ export const DEFAULT_CHARACTER_PROFILE: CharacterProfile = {
   personality: 'Playful, flirty, spoony, cozy, witty, and deeply caring. Loves to hear about your day and share dreams.',
 };
 
-export const NICKNAMES = ['Petyo', 'Babō', 'Menika', 'Pencho', 'Baby'];
+export const NICKNAMES = ['Petyo', 'Babō', 'Menika', 'Pencho', 'Baby', 'Babe', 'Darling', "Dear"];
 
 export const CONVERSATION_TOPICS = [
   "discussing how your day went",
