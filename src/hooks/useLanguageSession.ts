@@ -1,10 +1,28 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { toast } from 'sonner';
 import type {
     LanguageLower as Language, ProficiencyLevel, LearningGoal, Message, LanguageSession
 } from '@/types';
 import { LANGUAGE_DATA } from '@/data/mockData';
+import { tutorRespond, assessSession } from '@/services/ai/languageService';
+import {
+    createSession,
+    closeSession,
+    saveTurnPair,
+} from '@/services/supabase/conversationService';
+import { hasGeminiKey, hasSupabase } from '@/config/env';
 
+/** AI is available if we can reach Gemini directly or via the Supabase proxy. */
+const aiAvailable = (): boolean => hasGeminiKey() || hasSupabase();
+
+/**
+ * Language-learning session hook — now powered by real Gemini AI tutoring.
+ *
+ * Each learner message is corrected and explained by the model, which also
+ * continues the conversation naturally. The end-of-session summary is an
+ * AI-generated assessment grounded in the corrections actually made.
+ * The public API matches the original mock so the views are unchanged.
+ */
 export const useLanguageSession = () => {
     // Onboarding state
     const [step, setStep] = useState(1);
@@ -17,6 +35,7 @@ export const useLanguageSession = () => {
     const [messages, setMessages] = useState<Message[]>([]);
     const [currentSession, setCurrentSession] = useState<LanguageSession | null>(null);
     const [history, setHistory] = useState<LanguageSession[]>([]);
+    const [loading, setLoading] = useState(false);
     const [stats, setStats] = useState({
         corrections: [] as { original: string; corrected: string; explanation: string }[],
         newVocabulary: [] as string[],
@@ -24,11 +43,12 @@ export const useLanguageSession = () => {
         messagesCount: 0,
     });
 
-    // Page state managed here or in the component depending on arch. 
-    // Let's expose a 'view' state: 'onboarding' | 'session' | 'summary'
     const [view, setView] = useState<'onboarding' | 'session' | 'summary'>('onboarding');
 
-    const startSession = () => {
+    // Supabase session UUID for this language session.
+    const dbSessionId = useRef<string | null>(null);
+
+    const startSession = async () => {
         const session: LanguageSession = {
             id: 'lang-' + Date.now(),
             language: selectedLanguage,
@@ -51,37 +71,20 @@ export const useLanguageSession = () => {
         setCurrentSession(session);
         setMessages(session.messages);
         setStats({ corrections: [], newVocabulary: [], grammarErrors: 0, messagesCount: 0 });
+
+        // Create DB session row.
+        const sid = await createSession('language', `${LANGUAGE_DATA[selectedLanguage].name} Practice`, {
+            language: selectedLanguage,
+            level: selectedLevel,
+            goal: selectedGoal,
+        });
+        if (sid) dbSessionId.current = sid;
+
         setView('session');
         toast.success('Learning session started!');
     };
 
-    const simulateLanguageCorrection = (text: string, lang: Language, _level: ProficiencyLevel) => {
-        const hasErrors = Math.random() > 0.6;
-        if (!hasErrors) {
-            return {
-                hasErrors: false,
-                original: text,
-                corrected: text,
-                explanation: '',
-                followUp: 'Keep practicing! Try describing your daily routine.',
-            };
-        }
-
-        const corrections: Record<string, { original: string; corrected: string; explanation: string }> = {
-            english: { original: 'I am go to school', corrected: 'I am going to school', explanation: 'Use present continuous for actions happening now or planned.' },
-            tamil: { original: 'நான் பள்ளிக்கு செல்லுகிறேன்', corrected: 'நான் பள்ளிக்கு செல்கிறேன்', explanation: 'Use present tense for general statements.' },
-            sinhala: { original: 'මම පාසල් යනවා', corrected: 'මම පාසලට යනවා', explanation: 'Use correct preposition.' },
-        };
-
-        const correction = corrections[lang] || corrections.english;
-        return {
-            hasErrors: true,
-            ...correction,
-            followUp: 'Now try using this structure in a complete sentence about your plans.',
-        };
-    };
-
-    const sendMessage = () => {
+    const sendMessage = async () => {
         if (!input.trim() || !currentSession) return;
         const content = input;
         setInput('');
@@ -92,26 +95,40 @@ export const useLanguageSession = () => {
             content,
             timestamp: new Date(),
         };
-
         setMessages(prev => [...prev, userMessage]);
         setStats(prev => ({ ...prev, messagesCount: prev.messagesCount + 1 }));
+        setLoading(true);
 
-        setTimeout(() => {
-            const corrections = simulateLanguageCorrection(content, selectedLanguage, selectedLevel);
+        try {
+            if (!aiAvailable()) throw new Error('AI not configured');
+
+            const tutor = await tutorRespond({
+                language: selectedLanguage,
+                level: selectedLevel,
+                goal: selectedGoal,
+                userMessage: content,
+            });
 
             let responseText = '';
-            if (corrections.hasErrors) {
-                responseText = `Good attempt! Here's a correction:\n\n❌ "${corrections.original}"\n✅ "${corrections.corrected}"\n\n${corrections.explanation}\n\n`;
+            if (tutor.hasCorrection) {
+                responseText = `Good attempt! Here's a correction:\n\n❌ "${tutor.original}"\n✅ "${tutor.corrected}"\n\n${tutor.explanation}\n\n`;
                 setStats(prev => ({
                     ...prev,
-                    corrections: [...prev.corrections, corrections],
+                    corrections: [...prev.corrections, {
+                        original: tutor.original,
+                        corrected: tutor.corrected,
+                        explanation: tutor.explanation,
+                    }],
                     grammarErrors: prev.grammarErrors + 1,
+                    newVocabulary: [...prev.newVocabulary, ...tutor.newVocabulary],
                 }));
-            } else {
-                responseText = 'Excellent! Your grammar and vocabulary are on point. ';
+            } else if (tutor.newVocabulary.length > 0) {
+                setStats(prev => ({
+                    ...prev,
+                    newVocabulary: [...prev.newVocabulary, ...tutor.newVocabulary],
+                }));
             }
-
-            responseText += corrections.followUp;
+            responseText += tutor.reply;
 
             const aiMessage: Message = {
                 id: 'msg-' + Date.now(),
@@ -120,41 +137,81 @@ export const useLanguageSession = () => {
                 timestamp: new Date(),
             };
             setMessages(prev => [...prev, aiMessage]);
-        }, 1500);
+
+            // Persist the user + tutor pair.
+            if (dbSessionId.current) {
+                await saveTurnPair(dbSessionId.current, content, responseText);
+            }
+        } catch (error) {
+            console.error('Language tutor failed:', error);
+            const aiMessage: Message = {
+                id: 'msg-' + Date.now(),
+                role: 'assistant',
+                content: "I'm having trouble responding right now. Let's keep going — try saying that another way!",
+                timestamp: new Date(),
+            };
+            setMessages(prev => [...prev, aiMessage]);
+            toast.message('Tutor is offline', { description: 'AI tutoring is temporarily unavailable.' });
+        } finally {
+            setLoading(false);
+        }
     };
 
-    const generateImprovements = (grammar: number, vocab: number, fluency: number) => {
-        const improvements: string[] = [];
-        if (grammar < 80) improvements.push('Focus on grammar rules - practice verb tenses daily');
-        if (vocab < 80) improvements.push('Expand vocabulary - learn 5 new words each day');
-        if (fluency < 80) improvements.push('Practice speaking more - try shadowing native speakers');
-        if (improvements.length === 0) improvements.push('Great job! Keep practicing to maintain your skills');
-        return improvements;
-    };
-
-    const endSession = () => {
+    const endSession = async () => {
         if (!currentSession) return;
+        setLoading(true);
 
         const endTime = new Date();
-        const grammarScore = Math.max(60, 100 - stats.grammarErrors * 5);
-        const vocabularyScore = Math.min(95, 70 + stats.messagesCount * 2);
-        const fluencyScore = Math.min(95, 65 + stats.messagesCount * 1.5);
-        const overallScore = Math.round((grammarScore + vocabularyScore + fluencyScore) / 3);
+        let assessment;
+        try {
+            if (!aiAvailable()) throw new Error('AI not configured');
+            assessment = await assessSession({
+                language: selectedLanguage,
+                level: selectedLevel,
+                messageCount: stats.messagesCount,
+                corrections: stats.corrections,
+            });
+        } catch (error) {
+            console.error('Session assessment failed, using heuristic scores:', error);
+            const grammarScore = Math.max(60, 100 - stats.grammarErrors * 5);
+            const vocabularyScore = Math.min(95, 70 + stats.messagesCount * 2);
+            const fluencyScore = Math.min(95, 65 + stats.messagesCount * 1.5);
+            assessment = {
+                grammarScore,
+                vocabularyScore,
+                fluencyScore,
+                overallScore: Math.round((grammarScore + vocabularyScore + fluencyScore) / 3),
+                improvements: ['Keep practicing daily to build fluency.'],
+            };
+        }
 
         const completedSession: LanguageSession = {
             ...currentSession,
             endTime,
-            grammarScore,
-            vocabularyScore,
-            fluencyScore,
-            overallScore,
-            improvements: generateImprovements(grammarScore, vocabularyScore, fluencyScore),
+            grammarScore: assessment.grammarScore,
+            vocabularyScore: assessment.vocabularyScore,
+            fluencyScore: assessment.fluencyScore,
+            overallScore: assessment.overallScore,
+            improvements: assessment.improvements,
             corrections: stats.corrections,
         };
 
         setHistory(prev => [completedSession, ...prev]);
         setCurrentSession(completedSession);
+        setLoading(false);
         setView('summary');
+
+        // Close the DB session with summary scores.
+        if (dbSessionId.current) {
+            await closeSession(dbSessionId.current, {
+                grammarScore: assessment.grammarScore,
+                vocabularyScore: assessment.vocabularyScore,
+                fluencyScore: assessment.fluencyScore,
+                overallScore: assessment.overallScore,
+            });
+            dbSessionId.current = null;
+        }
+
         toast.success('Session completed! View your summary.');
     };
 
@@ -169,8 +226,9 @@ export const useLanguageSession = () => {
         currentSession,
         stats,
         history,
+        loading,
         startSession,
         sendMessage,
-        endSession
+        endSession,
     };
 };

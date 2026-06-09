@@ -1,9 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality, Blob as GenAIBlob } from '@google/genai';
+import { LiveServerMessage, Modality, Blob as GenAIBlob } from '@google/genai';
+import { getGeminiClient, VOICE_MODEL } from '@/services/ai/geminiClient';
 import { encode, decode, decodeAudioData } from '@/lib/audioUtils';
 import type { ConversationTurn } from '@/types';
 
-type LiveSession = Awaited<ReturnType<GoogleGenAI['live']['connect']>>;
+type LiveSession = Awaited<ReturnType<ReturnType<typeof getGeminiClient>['live']['connect']>>;
 
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'error' | 'closed';
 
@@ -66,9 +67,9 @@ export const useLiveSession = ({ systemInstruction, voiceName, onTurnComplete }:
 
     setConnectionState('connecting');
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = getGeminiClient();
       const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+        model: VOICE_MODEL,
         config: {
           systemInstruction,
           responseModalities: [Modality.AUDIO],
