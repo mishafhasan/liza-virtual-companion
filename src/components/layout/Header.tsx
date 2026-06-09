@@ -1,7 +1,7 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Settings, LogOut } from 'lucide-react';
-import { useAuth } from '@/context/AuthContext';
+import { useAuth } from '@/stores/authStore';
 import { LogoDisplay } from '@/components/shared/LizaLogo';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
