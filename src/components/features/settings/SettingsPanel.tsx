@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { canGenerateAvatar, generateAvatar } from '@/services/ai/avatarService';
+import { useSettingsStore } from '@/stores/settingsStore';
 import type { Settings, CharacterProfile, MemoryItem, Language } from '@/types';
 
 interface SettingsPanelProps {
@@ -19,9 +20,12 @@ interface SettingsPanelProps {
     onSettingsChange: (updates: Partial<Settings>) => void;
     characterProfile: CharacterProfile;
     onCharacterProfileChange: (updates: Partial<CharacterProfile>) => void;
-    memory: MemoryItem[];
-    onAddMemory: (item: MemoryItem) => void;
-    onDeleteMemory: (id: string) => void;
+    /** @deprecated SettingsPanel reads memory directly from the Zustand store. */
+    memory?: MemoryItem[];
+    /** @deprecated SettingsPanel uses addMemory directly from the Zustand store. */
+    onAddMemory?: (item: MemoryItem) => void;
+    /** @deprecated SettingsPanel uses deleteMemory directly from the Zustand store. */
+    onDeleteMemory?: (id: string) => void;
     onSave?: () => void;
 }
 
@@ -52,8 +56,15 @@ const compressImage = (dataUrl: string): Promise<string> => {
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     isOpen, onClose, settings, onSettingsChange,
     characterProfile, onCharacterProfileChange,
-    memory, onAddMemory, onDeleteMemory, onSave
+    onSave
 }) => {
+    // Read memory directly from the Zustand store so the Long-Term Memory
+    // section updates live when mid-conversation summarization adds new
+    // facts — no page reload needed.
+    const memory = useSettingsStore((s) => s.memory);
+    const addMemory = useSettingsStore((s) => s.addMemory);
+    const deleteMemory = useSettingsStore((s) => s.deleteMemory);
+
     const [newMemory, setNewMemory] = useState('');
     const [avatarPrompt, setAvatarPrompt] = useState('');
     const [isGenerating, setIsGenerating] = useState(false);
@@ -64,7 +75,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
     const handleAddMemory = () => {
         if (!newMemory.trim()) return;
-        onAddMemory({ id: Date.now().toString(), fact: newMemory.trim() });
+        addMemory({ id: Date.now().toString(), fact: newMemory.trim() });
         setNewMemory('');
     };
 
@@ -205,7 +216,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                                         memory.map((mem) => (
                                             <div key={mem.id} className="group flex items-start justify-between p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
                                                 <span className="text-sm text-gray-300">{mem.fact}</span>
-                                                <button onClick={() => onDeleteMemory(mem.id)} className="text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                <button onClick={() => deleteMemory(mem.id)} className="text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity">
                                                     <Trash2 className="w-4 h-4" />
                                                 </button>
                                             </div>

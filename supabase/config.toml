@@ -1,0 +1,45 @@
+# Supabase local configuration.
+# `project_id` is used as a namespace for local development containers.
+project_id = "liza-virtual-companion"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["http://localhost:3000/dashboard"]
+jwt_expiry = 3600
+enable_signup = true
+
+[auth.email]
+enable_signup = true
+enable_confirmations = false
+
+# Edge Functions. JWT verification is enabled by default; the chat/generate
+# proxies set verify_jwt = false so the app works before auth is wired up,
+# while heygen/embedding remain auth-gated in code.
+[functions.proxy-gemini-chat]
+verify_jwt = false
+
+[functions.proxy-gemini-generate]
+verify_jwt = false
+
+[functions.proxy-heygen-session]
+verify_jwt = true
+
+[functions.generate-embedding]
+verify_jwt = true

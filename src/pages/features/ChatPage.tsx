@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/stores/authStore';
 import { useSettings } from '@/stores/settingsStore';
 import { useChatSession } from '@/hooks/useChatSession';
@@ -10,11 +11,19 @@ import { ChatArea } from '@/components/features/chat/ChatArea';
 import { SettingsPanel } from '@/components/features/settings/SettingsPanel';
 import { VoiceModeOverlay } from '@/components/features/chat/VoiceModeOverlay';
 import { buildTextSystemInstruction, buildVoiceSystemInstruction } from '@/services/prompts/companionPrompt';
+import {
+    createSession,
+    closeSession,
+    saveTurn,
+    saveTurnPair,
+    updateSessionTitle,
+} from '@/services/supabase/conversationService';
 import type { ConversationTurn, Language } from '@/types';
 import { toast } from 'sonner';
 
 export const ChatPage: React.FC = () => {
     const { user } = useAuth();
+    const [searchParams, setSearchParams] = useSearchParams();
     const {
         settings,
         updateSettings,
@@ -29,6 +38,9 @@ export const ChatPage: React.FC = () => {
     const [isVoiceMode, setIsVoiceMode] = useState(false);
     const [isVideoMode, setIsVideoMode] = useState(settings.videoMode);
     const [voiceConversation, setVoiceConversation] = useState<ConversationTurn[]>([]);
+    const voiceSessionIdRef = useRef<string | null>(null);
+    const voiceSessionTitleRef = useRef(false);
+    const hasInitializedRef = useRef(false);
 
     // Emotion state management for intelligent mood adaptation
     const { emotionState, processUserInput, resetEmotionState } = useEmotionState();
@@ -69,12 +81,25 @@ export const ChatPage: React.FC = () => {
         createConversation,
         sendMessage: rawSendMessage,
         selectConversation,
+        deleteConversation,
         loadHistory,
     } = useChatSession({ systemInstructionOverride: textSystemInstruction });
 
-    // Load past conversations from Supabase on mount.
+    // Load past conversations from Supabase on mount, then handle session param.
+    // The `hasInitializedRef` guard ensures this runs exactly once even when the
+    // component remounts after route navigation (dashboard → chat).
+    // `loadHistory` now handles auto-selection and loads turns immediately,
+    // so the chat area shows content without requiring a sidebar click.
     useEffect(() => {
-        loadHistory();
+        if (hasInitializedRef.current) return;
+        hasInitializedRef.current = true;
+
+        const sessionId = searchParams.get('session');
+        loadHistory(sessionId ?? undefined).then(() => {
+            if (sessionId) {
+                setSearchParams({}, { replace: true });
+            }
+        });
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -138,12 +163,30 @@ export const ChatPage: React.FC = () => {
             };
             setVoiceConversation(prev => [...prev, turnWithEmotion]);
 
+            // Persist turns to the DB session and generate RAG memories
+            const sid = voiceSessionIdRef.current;
+            if (sid) {
+                if (turn.user && turn.liza) {
+                    saveTurnPair(sid, turn.user, turn.liza).catch(console.error);
+                } else {
+                    if (turn.user) saveTurn(sid, 'user', turn.user).catch(console.error);
+                    if (turn.liza) saveTurn(sid, 'liza', turn.liza).catch(console.error);
+                }
+
+                // Derive conversation title from the first user utterance
+                if (turn.user && !voiceSessionTitleRef.current) {
+                    const title = turn.user.slice(0, 40) + (turn.user.length > 40 ? '…' : '');
+                    updateSessionTitle(sid, title).catch(console.error);
+                    voiceSessionTitleRef.current = true;
+                }
+            }
+
             // If video mode is enabled and we have Liza's response, speak it via HeyGen
             if (isVideoMode && turn.liza && heygenSessionState === 'connected') {
                 heygenSpeak(turn.liza);
             }
 
-            // Simple memory creation: add user's turn to memory
+            // Simple memory creation: add user's turn to local state memory
             if (turn.user && turn.user.length > 5) {
                 addMemory({ id: Date.now().toString(), fact: turn.user });
             }
@@ -183,8 +226,14 @@ export const ChatPage: React.FC = () => {
         setIsVoiceMode(true);
         setVoiceConversation([]);
         resetEmotionState();
+        voiceSessionTitleRef.current = false;
+        voiceSessionIdRef.current = null;
 
         try {
+            // Create a DB session so voice turns get persisted like text conversations
+            const sid = await createSession('entertainment', 'Voice Conversation');
+            if (sid) voiceSessionIdRef.current = sid;
+
             await startVoiceSession();
 
             // Start HeyGen video session if enabled and configured
@@ -199,6 +248,11 @@ export const ChatPage: React.FC = () => {
         } catch (error) {
             console.error('Failed to start voice session:', error);
             toast.error('Failed to connect to voice AI');
+            // Clean up the orphaned session if one was created
+            if (voiceSessionIdRef.current) {
+                closeSession(voiceSessionIdRef.current).catch(console.error);
+                voiceSessionIdRef.current = null;
+            }
             setIsVoiceMode(false);
         }
     }, [startVoiceSession, startHeyGenSession, isVideoMode, settings.heygenApiKey, resetEmotionState]);
@@ -206,10 +260,21 @@ export const ChatPage: React.FC = () => {
     const handleStopVoiceMode = useCallback(() => {
         setIsVoiceMode(false);
         stopVoiceSession();
+
+        // Close the DB session so it appears in the conversation sidebar
+        const sid = voiceSessionIdRef.current;
+        if (sid) {
+            closeSession(sid).catch(console.error);
+            voiceSessionIdRef.current = null;
+        }
+
         if (heygenSessionState === 'connected') {
             stopHeyGenSession();
         }
-    }, [stopVoiceSession, stopHeyGenSession, heygenSessionState]);
+
+        // Reload conversation history to pick up the new voice session
+        loadHistory();
+    }, [stopVoiceSession, stopHeyGenSession, heygenSessionState, loadHistory]);
 
     // Toggle video mode
     const handleToggleVideoMode = useCallback(() => {
@@ -262,6 +327,7 @@ export const ChatPage: React.FC = () => {
                 currentConversationId={currentConversation?.id}
                 onNewChat={createConversation}
                 onSelectChat={selectConversation}
+                onDeleteChat={deleteConversation}
             />
 
             <ChatArea
@@ -287,6 +353,7 @@ export const ChatPage: React.FC = () => {
                 emotionIntensity={emotionState.intensity}
                 language={settings.language}
                 onLanguageChange={handleLanguageChange}
+                characterProfile={characterProfile}
             />
 
             <SettingsPanel

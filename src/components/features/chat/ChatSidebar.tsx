@@ -1,7 +1,13 @@
 import React from 'react';
-import { Plus } from 'lucide-react';
+import { Plus, MoreVertical, Trash } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { Conversation } from '@/types';
 
 interface ChatSidebarProps {
@@ -10,10 +16,11 @@ interface ChatSidebarProps {
     currentConversationId?: string;
     onNewChat: () => void;
     onSelectChat: (id: string) => void;
+    onDeleteChat?: (id: string) => void;
 }
 
 export const ChatSidebar: React.FC<ChatSidebarProps> = ({
-    isOpen, conversations, currentConversationId, onNewChat, onSelectChat
+    isOpen, conversations, currentConversationId, onNewChat, onSelectChat, onDeleteChat
 }) => {
     return (
         <div className={`${isOpen ? 'w-80' : 'w-0'} transition-all duration-300 bg-slate-900/95 border-r border-white/5 flex flex-col overflow-hidden flex-shrink-0`}>
@@ -26,17 +33,50 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
             <ScrollArea className="flex-1">
                 <div className="p-2 space-y-1">
                     {conversations.map((conv) => (
-                        <button
-                            key={conv.id}
-                            onClick={() => onSelectChat(conv.id)}
-                            className={`w-full p-3 rounded-xl text-left transition-all ${currentConversationId === conv.id
-                                ? 'bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-500/30 text-white'
-                                : 'text-gray-400 hover:bg-white/5 hover:text-white'
-                                }`}
-                        >
-                            <div className="font-medium truncate text-sm">{conv.title}</div>
-                            <div className="text-xs opacity-60 mt-0.5">{conv.updatedAt.toLocaleDateString()}</div>
-                        </button>
+                        <div key={conv.id} className="relative group">
+                            <button
+                                onClick={() => onSelectChat(conv.id)}
+                                className={`w-full p-3 pr-10 rounded-xl text-left transition-all ${currentConversationId === conv.id
+                                    ? 'bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-500/30 text-white'
+                                    : 'text-gray-400 hover:bg-white/5 hover:text-white'
+                                    }`}
+                            >
+                                <div className="font-medium truncate text-sm">{conv.title}</div>
+                                <div className="text-xs opacity-60 mt-0.5">{conv.updatedAt.toLocaleDateString()}</div>
+                            </button>
+
+                            {onDeleteChat && (
+                                <div className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-7 w-7 text-gray-500 hover:text-white hover:bg-white/10"
+                                                onClick={(e) => e.stopPropagation()}
+                                            >
+                                                <MoreVertical className="h-4 w-4" />
+                                            </Button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent
+                                            align="end"
+                                            className="bg-slate-800 border-white/10 text-white"
+                                        >
+                                            <DropdownMenuItem
+                                                className="text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer gap-2"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    onDeleteChat(conv.id);
+                                                }}
+                                            >
+                                                <Trash className="w-4 h-4" />
+                                                Delete Chat
+                                            </DropdownMenuItem>
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
+                                </div>
+                            )}
+                        </div>
                     ))}
                 </div>
             </ScrollArea>

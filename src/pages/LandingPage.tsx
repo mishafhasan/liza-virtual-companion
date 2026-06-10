@@ -1,12 +1,46 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Bot, Play, MessageSquare, Brain, Briefcase, Layers, CheckCircle, ArrowRight, Twitter, Github, Globe } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { LogoDisplay } from '@/components/shared/LizaLogo';
 import { AnimatedSection } from '@/components/shared/AnimatedSection';
+import { useAuthStore } from '@/stores/authStore';
 
 export const LandingPage: React.FC = () => {
     const navigate = useNavigate();
+    const user = useAuthStore((s) => s.user);
+    const initialized = useAuthStore((s) => s.initialized);
+    const initialize = useAuthStore((s) => s.initialize);
+
+    // Synchronously check if a session token exists in local storage to prevent flash of landing page
+    const hasLikelySession = React.useMemo(() => {
+        try {
+            return Object.keys(localStorage).some(key => key.startsWith('sb-') && key.endsWith('-auth-token'));
+        } catch {
+            return false;
+        }
+    }, []);
+
+    // Initialize auth state on mount
+    useEffect(() => {
+        initialize();
+    }, [initialize]);
+
+    // Redirect authenticated users to dashboard
+    useEffect(() => {
+        if (initialized && user) {
+            navigate('/dashboard', { replace: true });
+        }
+    }, [initialized, user, navigate]);
+
+    // If there's a stored session and we're not initialized yet, don't render the landing page to avoid a flash
+    if (!initialized && hasLikelySession) {
+        return <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+            <div className="animate-pulse flex flex-col items-center gap-4">
+                <div className="w-16 h-16 rounded-full border-4 border-purple-500/30 border-t-purple-500 animate-spin" />
+            </div>
+        </div>;
+    }
 
     const features = [
         {
@@ -35,7 +69,7 @@ export const LandingPage: React.FC = () => {
     return (
         <div className="min-h-screen bg-slate-950 overflow-x-hidden">
             <nav className="sticky top-0 z-50 flex items-center justify-between px-6 lg:px-12 py-4 bg-slate-950/40 backdrop-blur-md border-b border-white/5 supports-[backdrop-filter]:bg-slate-950/20">
-                <LogoDisplay size={44} textSize="text-2xl" />
+                <LogoDisplay width={120} height={40} textSize="text-2xl" />
                 <div className="flex items-center gap-6">
                     <Button variant="ghost" className="text-gray-300 hover:text-white hover:bg-white/5 transition-colors hidden sm:flex font-medium" onClick={() => navigate('/login')}>
                         Sign In
@@ -145,9 +179,9 @@ export const LandingPage: React.FC = () => {
                                             </div>
                                         </div>
                                         <div className="mt-3 flex gap-1.5">
-                                            <span className="text-xs bg-white/5 rounded-full px-2 py-0.5">🇺🇸 EN</span>
-                                            <span className="text-xs bg-white/5 rounded-full px-2 py-0.5">🇮🇳 TA</span>
-                                            <span className="text-xs bg-white/5 rounded-full px-2 py-0.5">🇱🇰 SI</span>
+                                            <span className="text-xs bg-white/5 rounded-full px-2 py-0.5">English</span>
+                                            <span className="text-xs bg-white/5 rounded-full px-2 py-0.5">Tamil</span>
+                                            <span className="text-xs bg-white/5 rounded-full px-2 py-0.5">Sinhala</span>
                                         </div>
                                     </div>
 
@@ -224,7 +258,7 @@ export const LandingPage: React.FC = () => {
                 <div className="max-w-7xl mx-auto px-6 lg:px-12">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-10 mb-12">
                         <div className="col-span-2 md:col-span-1">
-                            <LogoDisplay size={36} />
+                            <LogoDisplay width={120} height={40} textSize="text-2xl" />
                             <p className="text-gray-500 text-sm mt-4 leading-relaxed max-w-xs">
                                 Your intelligent AI companion for entertainment, language learning, and interview preparation.
                             </p>

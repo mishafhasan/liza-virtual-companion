@@ -47,7 +47,7 @@ export const AuthPage: React.FC = () => {
             <div className="w-full max-w-md">
                 <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-8">
                     <div className="flex items-center justify-center gap-3 mb-8 cursor-pointer" onClick={() => navigate('/')}>
-                        <LogoDisplay size={48} />
+                        <LogoDisplay width={120} height={40} />
                     </div>
 
                     <Tabs value={authView} onValueChange={(v) => setAuthView(v as 'login' | 'signup')}>

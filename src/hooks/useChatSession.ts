@@ -9,6 +9,7 @@ import {
     loadTurns,
     retrieveRelevantMemories,
     summarizeMessageBatch,
+    deleteSession,
 } from '@/services/supabase/conversationService';
 import { addXP, updateRecentActivity, XP_REWARDS } from '@/services/supabase/userStatsService';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -360,6 +361,35 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         await updateRecentActivity('entertainment', id);
     }, [conversations]);
 
+    // ─── Delete a conversation ─────────────────────────────────────────────────
+    const deleteConversation = useCallback(async (id: string) => {
+        // Save a snapshot so we can revert if the DB delete fails
+        const snapshot = conversations;
+
+        // Optimistically remove it from the list immediately
+        setConversations(prev => prev.filter(c => c.id !== id));
+
+        // If the deleted chat is currently open, clear the view
+        if (currentConversation?.id === id || dbSessionId.current === id) {
+            setCurrentConversation(null);
+            dbSessionId.current = null;
+        }
+
+        try {
+            await deleteSession(id);
+            toast.success('Chat deleted', {
+                description: 'The conversation has been permanently deleted.',
+            });
+        } catch (error) {
+            console.error('Failed to delete conversation:', error);
+            // Revert the optimistic update so the user doesn't lose their chat list
+            setConversations(snapshot);
+            toast.error('Failed to delete chat', {
+                description: 'Could not delete the conversation. Please try again.',
+            });
+        }
+    }, [conversations, currentConversation?.id]);
+
     return {
         conversations,
         currentConversation,
@@ -373,6 +403,7 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         createConversation,
         sendMessage,
         selectConversation,
+        deleteConversation,
         loadHistory,
     };
 };
