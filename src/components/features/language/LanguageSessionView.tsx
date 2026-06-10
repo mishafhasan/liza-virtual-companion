@@ -4,7 +4,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { LizaLogo } from '@/components/shared/LizaLogo';
 import type { Message, LanguageSession } from '@/types';
 import { LANGUAGE_DATA } from '@/data/mockData';
 import { useAuth } from '@/stores/authStore';
@@ -55,7 +54,11 @@ export const LanguageSessionView: React.FC<LanguageSessionViewProps> = ({
                         <div key={msg.id} className={`flex items-start gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                             <div className="flex-shrink-0 mt-1">
                                 {msg.role === 'assistant' ? (
-                                    <LizaLogo width={48} height={16} className="rounded-full bg-blue-500/10 p-1" />
+                                    <Avatar className="w-8 h-8">
+                                        <AvatarFallback className="bg-gradient-to-br from-blue-500 to-teal-500 text-white text-xs font-bold">
+                                            L
+                                        </AvatarFallback>
+                                    </Avatar>
                                 ) : (
                                     <Avatar className="w-8 h-8">
                                         <AvatarFallback className="bg-gradient-to-br from-blue-500 to-teal-500 text-white text-xs">
@@ -75,7 +78,11 @@ export const LanguageSessionView: React.FC<LanguageSessionViewProps> = ({
                     {loading && (
                         <div className="flex items-start gap-3">
                             <div className="flex-shrink-0 mt-1">
-                                <LizaLogo width={48} height={16} className="rounded-full bg-blue-500/10 p-1" />
+                                <Avatar className="w-8 h-8">
+                                    <AvatarFallback className="bg-gradient-to-br from-blue-500 to-teal-500 text-white text-xs font-bold">
+                                        L
+                                    </AvatarFallback>
+                                </Avatar>
                             </div>
                             <div className="max-w-[80%] p-4 rounded-2xl bg-white/5 border border-white/10 text-gray-300 rounded-tl-none">
                                 <span className="inline-flex gap-1">

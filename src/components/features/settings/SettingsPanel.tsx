@@ -9,7 +9,7 @@ import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { generateAvatar } from '@/services/ai/avatarService';
+import { canGenerateAvatar, generateAvatar } from '@/services/ai/avatarService';
 import type { Settings, CharacterProfile, MemoryItem, Language } from '@/types';
 
 interface SettingsPanelProps {
@@ -58,6 +58,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     const [avatarPrompt, setAvatarPrompt] = useState('');
     const [isGenerating, setIsGenerating] = useState(false);
     const [generationError, setGenerationError] = useState('');
+    const avatarGenerationEnabled = canGenerateAvatar();
 
     if (!isOpen) return null;
 
@@ -81,7 +82,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 onCharacterProfileChange({ avatar: rawImageUrl });
             }
         } catch (error: any) {
-            setGenerationError(error?.message || 'Failed to generate avatar. Please check your API key.');
+            setGenerationError(error?.message || 'Failed to generate avatar. Please try again later.');
         } finally {
             setIsGenerating(false);
         }
@@ -93,7 +94,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
     return (
         <div className="fixed inset-y-0 right-0 w-[420px] bg-slate-900/95 backdrop-blur-xl border-l border-white/10 shadow-2xl transform transition-transform duration-300 ease-in-out z-50 flex flex-col">
-            <div className="flex items-center justify-between p-6 border-b border-white/10">
+            <div className="flex items-center justify-between p-6 border-b border-white/10 shrink-0">
                 <div>
                     <h2 className="text-xl font-semibold text-white">Settings</h2>
                     <p className="text-xs text-gray-500 mt-1">Customize personality, memory, voice, and call behavior</p>
@@ -103,7 +104,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 </Button>
             </div>
 
-            <ScrollArea className="flex-1">
+            <ScrollArea className="flex-1 min-h-0">
                 <div className="p-6 space-y-2">
                     <Tabs defaultValue="character">
                         <TabsList className="grid w-full grid-cols-3 mb-6 bg-white/10 border border-white/10">
@@ -166,7 +167,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                                         />
                                         <Button
                                             onClick={handleGenerateAvatar}
-                                            disabled={isGenerating || !avatarPrompt.trim()}
+                                            disabled={isGenerating || !avatarPrompt.trim() || !avatarGenerationEnabled}
                                             className="w-full bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-40"
                                         >
                                             {isGenerating ? (
@@ -177,6 +178,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                                         </Button>
                                         {generationError && (
                                             <p className="text-xs text-red-400">{generationError}</p>
+                                        )}
+                                        {!avatarGenerationEnabled && (
+                                            <p className="text-xs text-gray-500">Avatar generation is unavailable until the app developer configures Stability AI.</p>
                                         )}
                                     </div>
                                 </div>
@@ -353,7 +357,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 </div>
             </ScrollArea>
 
-            <div className="p-6 border-t border-white/10 bg-slate-900/90">
+            <div className="p-6 border-t border-white/10 bg-slate-900/90 shrink-0">
                 <Button onClick={onSave} className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white hover:shadow-lg hover:shadow-purple-500/25">
                     <Save className="w-4 h-4 mr-2" />
                     Save & Restart Session

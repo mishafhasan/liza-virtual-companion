@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { LizaLogo } from '@/components/shared/LizaLogo';
 import { EMOTION_COLORS, EMOTION_LABELS } from '@/constants';
 import type { Conversation, AIPersonality, User, EmotionType, Language } from '@/types';
@@ -34,6 +34,7 @@ interface ChatAreaProps {
     emotionIntensity?: number;
     language?: Language;
     onLanguageChange?: (lang: Language) => void;
+    characterProfile?: { name: string; avatar?: string };
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -41,7 +42,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     sidebarOpen, setSidebarOpen, isVideoMode, setIsVideoMode,
     onVoiceMode, onSettings, personality, setPersonality,
     videoStream, heygenState, onStartHeyGen,
-    currentEmotion = 'neutral', emotionIntensity = 50, language = 'English', onLanguageChange
+    currentEmotion = 'neutral', emotionIntensity = 50, language = 'English', onLanguageChange,
+    characterProfile
 }) => {
     const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -145,12 +147,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             )}
 
             {/* Messages Area */}
-            <ScrollArea className="flex-1">
-                <div className="p-4 pb-24">
+            <ScrollArea className="flex-1 min-h-0">
+                <div className="p-4">
                     {!conversation ? (
                         <div className="h-full flex flex-col items-center justify-center text-center p-8 min-h-[60vh]">
                             <div className="relative mb-6">
-                                <LizaLogo width={200} height={66} className="rounded-2xl" />
+                                <LizaLogo width={160} height={60} className="rounded-2xl" />
                                 <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-green-400 border-2 border-slate-950" />
                             </div>
                             <h2 className="text-2xl font-bold text-white mb-2">Start a Conversation</h2>
@@ -166,7 +168,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                 <div key={msg.id} className={`flex items-end gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                     {msg.role === 'assistant' && (
                                         <div className="flex-shrink-0 mb-1">
-                                            <LizaLogo width={42} height={14} className="rounded-full" />
+                                            <Avatar className="w-8 h-8">
+                                                {characterProfile?.avatar && (
+                                                    <AvatarImage src={characterProfile.avatar} alt={characterProfile.name} className="object-cover" />
+                                                )}
+                                                <AvatarFallback className="bg-gradient-to-br from-purple-500 to-pink-500 text-white text-xs font-bold">
+                                                    {characterProfile?.name ? characterProfile.name.charAt(0).toUpperCase() : 'L'}
+                                                </AvatarFallback>
+                                            </Avatar>
                                         </div>
                                     )}
                                     <div className={`max-w-[75%] px-4 py-3 ${msg.role === 'user'
@@ -192,7 +201,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             {loading && (
                                 <div className="flex items-end gap-2 justify-start">
                                     <div className="flex-shrink-0 mb-1">
-                                        <LizaLogo width={42} height={14} className="rounded-full" />
+                                        <Avatar className="w-8 h-8">
+                                            {characterProfile?.avatar && (
+                                                <AvatarImage src={characterProfile.avatar} alt={characterProfile.name} className="object-cover" />
+                                            )}
+                                            <AvatarFallback className="bg-gradient-to-br from-purple-500 to-pink-500 text-white text-xs font-bold">
+                                                {characterProfile?.name ? characterProfile.name.charAt(0).toUpperCase() : 'L'}
+                                            </AvatarFallback>
+                                        </Avatar>
                                     </div>
                                     <div className="bg-white/[0.06] border border-white/5 px-5 py-4 rounded-2xl rounded-bl-md shadow-lg shadow-black/10">
                                         <div className="flex gap-1.5">
@@ -210,7 +226,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             </ScrollArea>
 
             {/* Input */}
-            <div className="absolute bottom-0 left-0 right-0 z-40 bg-slate-950/95 backdrop-blur-xl border-t border-white/5 p-3 sm:p-4">
+            <div className="w-full bg-slate-950/95 backdrop-blur-xl border-t border-white/5 p-3 sm:p-4 z-40 flex-shrink-0">
                 <div className="max-w-3xl mx-auto w-full">
                     <div className="flex items-center gap-2 bg-white/[0.04] border border-white/10 rounded-2xl px-3 py-1.5 focus-within:border-purple-500/50 focus-within:ring-1 focus-within:ring-purple-500/20 transition-all">
                         <Input

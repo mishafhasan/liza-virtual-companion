@@ -172,7 +172,7 @@ export const VoiceModeOverlay: React.FC<VoiceModeOverlayProps> = ({
                 <div className="absolute inset-0 pointer-events-none bg-gradient-to-b from-white/[0.03] via-transparent to-black/30" />
 
                 {/* ===== HEADER ===== */}
-                <div className="relative z-10 px-5 pt-5 pb-3">
+                <div className="relative z-10 px-5 pt-5 pb-3 shrink-0">
                     <div className="flex items-center justify-between">
                         {/* Status Badge */}
                         <div className="flex items-center gap-2.5 px-4 py-2 rounded-full border border-white/15 bg-white/5 backdrop-blur-sm">
@@ -201,7 +201,7 @@ export const VoiceModeOverlay: React.FC<VoiceModeOverlayProps> = ({
                 <div className="relative z-10 flex-1 flex flex-col px-5 py-2 overflow-hidden">
                     
                     {/* Avatar Section */}
-                    <div className="flex flex-col items-center mt-2 mb-4">
+                    <div className="flex flex-col items-center mt-2 mb-4 shrink-0 transition-all duration-500">
                         {/* Avatar Container */}
                         <div className="relative">
                             {/* Animated rings */}
@@ -285,7 +285,7 @@ export const VoiceModeOverlay: React.FC<VoiceModeOverlayProps> = ({
 
                     {/* Live Transcription */}
                     {(lizaTranscription || userTranscription) && (
-                        <div className="mb-3 p-3.5 rounded-2xl border border-white/10 bg-white/[0.03] backdrop-blur-sm">
+                        <div className="mb-3 p-3.5 rounded-2xl border border-white/10 bg-white/[0.03] backdrop-blur-sm shrink-0">
                             {lizaTranscription && (
                                 <p className="text-sm text-purple-200">
                                     <span className="text-purple-400 font-semibold">{characterName}: </span>
@@ -303,11 +303,11 @@ export const VoiceModeOverlay: React.FC<VoiceModeOverlayProps> = ({
 
                     {/* Chat History */}
                     {conversationHistory.length > 0 && (
-                        <div className="flex-1 min-h-0 mb-3 rounded-2xl border border-white/10 bg-black/20 backdrop-blur-sm overflow-hidden">
-                            <div className="px-4 py-2 border-b border-white/5">
+                        <div className="flex-1 min-h-0 flex flex-col mb-3 rounded-2xl border border-white/10 bg-black/20 backdrop-blur-sm overflow-hidden">
+                            <div className="px-4 py-2 border-b border-white/5 shrink-0">
                                 <span className="text-[10px] uppercase tracking-widest text-white/40 font-semibold">Conversation</span>
                             </div>
-                            <div ref={scrollRef} className="h-full overflow-y-auto p-3 space-y-3 scrollbar-thin">
+                            <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3 scrollbar-thin">
                                 {conversationHistory.map((turn, i) => (
                                     <div key={i} className="space-y-2">
                                         {turn.user && (
@@ -332,7 +332,7 @@ export const VoiceModeOverlay: React.FC<VoiceModeOverlayProps> = ({
                 </div>
 
                 {/* ===== CONTROLS ===== */}
-                <div className="relative z-10 px-5 pb-6 pt-3">
+                <div className="relative z-10 px-5 pb-6 pt-3 shrink-0">
                     {/* Text Input */}
                     {onSendText && (
                         <div className="relative mb-4">
