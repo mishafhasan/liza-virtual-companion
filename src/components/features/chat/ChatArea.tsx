@@ -150,7 +150,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     {!conversation ? (
                         <div className="h-full flex flex-col items-center justify-center text-center p-8 min-h-[60vh]">
                             <div className="relative mb-6">
-                                <LizaLogo size={80} className="rounded-2xl" />
+                                <LizaLogo width={200} height={66} className="rounded-2xl" />
                                 <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-green-400 border-2 border-slate-950" />
                             </div>
                             <h2 className="text-2xl font-bold text-white mb-2">Start a Conversation</h2>
@@ -166,7 +166,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                 <div key={msg.id} className={`flex items-end gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                     {msg.role === 'assistant' && (
                                         <div className="flex-shrink-0 mb-1">
-                                            <LizaLogo size={28} className="rounded-full" />
+                                            <LizaLogo width={42} height={14} className="rounded-full" />
                                         </div>
                                     )}
                                     <div className={`max-w-[75%] px-4 py-3 ${msg.role === 'user'
@@ -192,7 +192,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             {loading && (
                                 <div className="flex items-end gap-2 justify-start">
                                     <div className="flex-shrink-0 mb-1">
-                                        <LizaLogo size={28} className="rounded-full" />
+                                        <LizaLogo width={42} height={14} className="rounded-full" />
                                     </div>
                                     <div className="bg-white/[0.06] border border-white/5 px-5 py-4 rounded-2xl rounded-bl-md shadow-lg shadow-black/10">
                                         <div className="flex gap-1.5">

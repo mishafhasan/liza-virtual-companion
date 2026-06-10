@@ -19,7 +19,7 @@ export const Header: React.FC = () => {
         <header className="flex items-center justify-between px-6 lg:px-12 py-4 bg-slate-950/70 backdrop-blur-md border-b border-white/5 sticky top-0 z-50 supports-[backdrop-filter]:bg-slate-950/50">
             <div className="flex items-center gap-4">
                 <button onClick={() => navigate('/dashboard')} className="hover:opacity-80 transition-opacity">
-                    <LogoDisplay size={36} />
+                    <LogoDisplay width={100} height={34} />
                 </button>
             </div>
             <div className="flex items-center gap-4">
