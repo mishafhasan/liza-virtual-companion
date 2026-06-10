@@ -19,7 +19,7 @@ export async function generateAvatar(appearancePrompt: string): Promise<string> 
   const apiKey = env.stabilityApiKey;
   if (!apiKey) {
     throw new Error(
-      'Add STABILITY_API_KEY to your .env.local. Get a free key at platform.stability.ai',
+      'Avatar generation is not configured. The app developer must set STABILITY_API_KEY.',
     );
   }
 

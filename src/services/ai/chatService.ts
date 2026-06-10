@@ -1,4 +1,5 @@
 import { getGeminiClient, TEXT_MODEL } from './geminiClient';
+import { hasGeminiKey } from '@/config/env';
 import { getSupabaseClient } from '@/services/supabase/supabaseClient';
 
 /** A single conversational turn passed to the model as history. */
@@ -24,6 +25,26 @@ function toGeminiContents(history: ChatTurn[]) {
     role: turn.role === 'user' ? ('user' as const) : ('model' as const),
     parts: [{ text: turn.content }],
   }));
+}
+
+async function generateChatReplyDirect(
+  systemInstruction: string,
+  history: ChatTurn[],
+  maxOutputTokens: number,
+  temperature: number,
+): Promise<string> {
+  const ai = getGeminiClient();
+  const response = await ai.models.generateContent({
+    model: TEXT_MODEL,
+    contents: toGeminiContents(history),
+    config: {
+      systemInstruction,
+      maxOutputTokens,
+      temperature,
+    },
+  });
+
+  return response.text?.trim() || '';
 }
 
 /**
@@ -53,23 +74,20 @@ export async function generateChatReply(params: GenerateTextParams): Promise<str
         temperature,
       },
     });
-    if (error) throw error;
-    return (data?.content ?? '').trim();
+    if (!error) {
+      return (data?.content ?? '').trim();
+    }
+
+    if (!hasGeminiKey()) {
+      throw error;
+    }
+
+    console.warn('[chatService] Gemini proxy failed; falling back to direct client:', error.message);
+    return generateChatReplyDirect(systemInstruction, history, maxOutputTokens, temperature);
   }
 
   // Fallback path: call Gemini directly from the client.
-  const ai = getGeminiClient();
-  const response = await ai.models.generateContent({
-    model: TEXT_MODEL,
-    contents: toGeminiContents(history),
-    config: {
-      systemInstruction,
-      maxOutputTokens,
-      temperature,
-    },
-  });
-
-  return response.text?.trim() || '';
+  return generateChatReplyDirect(systemInstruction, history, maxOutputTokens, temperature);
 }
 
 /**
@@ -131,8 +149,25 @@ export async function generateJson<T>(
     const { data, error } = await supabase.functions.invoke('proxy-gemini-generate', {
       body: { systemInstruction, prompt, temperature, maxTokens: maxOutputTokens, json: true },
     });
-    if (error) throw error;
-    raw = data?.content ?? '';
+    if (!error) {
+      raw = data?.content ?? '';
+    } else if (hasGeminiKey()) {
+      console.warn('[chatService] Gemini JSON proxy failed; falling back to direct client:', error.message);
+      const ai = getGeminiClient();
+      const response = await ai.models.generateContent({
+        model: TEXT_MODEL,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          systemInstruction,
+          temperature,
+          maxOutputTokens,
+          responseMimeType: 'application/json',
+        },
+      });
+      raw = response.text ?? '';
+    } else {
+      throw error;
+    }
   } else {
     // Fallback path: call Gemini directly from the client.
     const ai = getGeminiClient();

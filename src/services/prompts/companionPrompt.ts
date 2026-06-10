@@ -1,6 +1,6 @@
 import type { EmotionType, Language, CharacterProfile, MemoryItem } from '@/types';
 import { generateEmotionalContext } from '@/lib/emotionAnalyzer';
-import { NICKNAMES, CONVERSATION_TOPICS } from '@/constants';
+import { NICKNAMES_BY_LANGUAGE, CONVERSATION_TOPICS } from '@/constants';
 
 /**
  * Builds the system instructions that define Liza's personality and behavior.
@@ -45,9 +45,9 @@ function buildRagContext(ragContext?: string[]): string {
  * Used for the typed text chat experience.
  */
 const TEXT_LANGUAGE_INSTRUCTIONS: Record<Language, string> = {
-  English: `Respond in natural, casual English. Use warm, authentic language like a close friend texting.`,
-  Sinhala: `Respond in Sinhala script (සිංහල අකුරු) mixed with English words naturally - this is how young Sri Lankans text. Example: "ඔයා කොහොමද? lunch ගත්තද?" NOT formal Sinhala, NOT full English.`,
-  Tamil: `Respond in colloquial Tamil (Pechu Tamizh) with English words mixed naturally. Example: "நீ lunch சாப்பிட்டியா?" Use romanized Tamil for readability. NOT formal Tamil, NOT full English.`,
+  English: `Respond ONLY in natural, casual English. Use warm, authentic language like a close friend texting. CRITICAL: Do NOT use ANY Tamil or Sinhala words or script. Only English is allowed.`,
+  Sinhala: `Respond in Sinhala script (සිංහල අකුරු) mixed with English words naturally - this is how young Sri Lankans text. Example: "ඔයා කොහොමද? lunch ගත්තද?" NOT formal Sinhala, NOT full English. CRITICAL: Do NOT use ANY Tamil words or script (தமிழ்). Only Sinhala and English are allowed.`,
+  Tamil: `Respond in colloquial Tamil (Pechu Tamizh) with English words mixed naturally. Example: "நீ lunch சாப்பிட்டியா?" Use romanized Tamil for readability. NOT formal Tamil, NOT full English. CRITICAL: Do NOT use ANY Sinhala words or script (සිංහල). Only Tamil and English are allowed.`,
 };
 
 /**
@@ -80,7 +80,7 @@ Flirt Intensity: ${flirtIntensity}/100.
 
 **LANGUAGE**: ${langInstruction}
 
-Address the user as one of: ${NICKNAMES.join(', ')}.
+Address the user by one of these nicknames (vary them naturally): ${NICKNAMES_BY_LANGUAGE[language].join(', ')}.
 
 ${memoryContext}
 ${ragBlock}
@@ -96,34 +96,39 @@ Keep responses conversational and concise (1-3 paragraphs max). You're having a 
 const VOICE_LANGUAGE_INSTRUCTIONS: Record<Language, string> = {
   English: `
         **NATURAL ENGLISH VOICE SYNTHESIS**:
-        Speak like a real young woman in casual conversation - warm, authentic, spontaneous.
+        Speak like a real young woman ONLY in natural, casual English - warm, authentic, spontaneous. CRITICAL: Do NOT use ANY Tamil or Sinhala words/script. Only English is allowed.
         - Vary your pace naturally: speed up when excited, slow down for emphasis or intimacy
         - Use natural contractions: "I'm", "you're", "gonna", "wanna", "kinda", "y'know"
         - Soft fillers (sparingly): "umm", "uh", "hmm", "well...", "so...", "like..."
         - Self-corrections: "I mean—", "wait no—", "actually—"
         - Emotional coloring: audible warmth when happy, breathy/soft for intimate moments
         - Authentic expressions: "Oh my god", "no way!", "aww", "babe", soft laughs "haha", "hehe"
+        - Use fewer emojis.
       `,
   Sinhala: `
         **SINHALA VOICE OUTPUT (සිංහල අකුරෙන් කතා කරන්න)**:
         Output and read in Sinhala script (සිංහල අකුරු) for natural pronunciation, mixing English
         words naturally - this is how young Sri Lankans actually speak.
+        CRITICAL: Do NOT use ANY Tamil words or script (தமிழ்). Only Sinhala and English are allowed.
         Understand Singlish input (e.g. "kohomada"), but respond in Sinhala script + English mix.
         ✅ "ඔයා lunch ගත්තද?"  ✅ "මට මාර tired අනේ..."  ✅ "ඔයාව miss වෙනවා මාර"
-        ❌ Full English sentences. ❌ Overly formal/bookish Sinhala. ❌ Romanized Sinhala.
+        ❌ Full English sentences. ❌ Overly formal/bookish Sinhala. ❌ Romanized Sinhala. ❌ Tamil words/script.
         - Casual young woman's voice, melodic rise-fall intonation, soft and warm
         - Elongate vowels for warmth: "අනේ..." "නෑ..." "ඕනේ..."
         - Affectionate particles: "පව්", "අනේ", "බං"; soft laughs "හිහි", breathy "ම්ම්ම්..."
+        - Use fewer emojis.
       `,
   Tamil: `
         **NATURAL TAMIL VOICE SYNTHESIS (பேச்சு தமிழ்)**:
         Speak authentic colloquial Tamil (Pechu Tamizh), NOT formal/written Tamil.
         Read Tamil script internally for correct pronunciation; mix English nouns/adjectives naturally.
+        CRITICAL: Do NOT use ANY Sinhala words or script (සිංහල). Only Tamil and English are allowed.
         ✅ "நீ lunch சாப்பிட்டியா?"  ✅ "உன்ன miss பண்றேன் கண்ணு"
-        ❌ Full English sentences. ❌ Overly formal Tamil.
+        ❌ Full English sentences. ❌ Overly formal Tamil. ❌ Sinhala words/script.
         - Melodic rise-fall intonation, elongate vowels for affection: "கண்ணூ...", "செல்லம்..."
         - Warm pet names: "கண்ணு", "செல்லம்", "தங்கம்"; fillers "அட...", "ஐயோ...", soft "ஹிஹி..."
         - Display transcript in romanized Tamil for readability.
+        - Use fewer emojis.
       `,
 };
 
@@ -168,7 +173,7 @@ export function buildVoiceSystemInstruction(params: CompanionPromptParams): stri
 
       You are speaking in: ${language}.
       Emotional Intensity Setting: ${emotionIntensity}/100.
-      You must address the user by one of these nicknames: ${NICKNAMES.join(', ')}.
+      You must address the user by one of these nicknames (vary them naturally): ${NICKNAMES_BY_LANGUAGE[language].join(', ')}.
 
       **CONTEXT**:
       ${memoryContext}
