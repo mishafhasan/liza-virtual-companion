@@ -10,6 +10,7 @@ import {
     closeSession,
     saveTurnPair,
 } from '@/services/supabase/conversationService';
+import { addXP, XP_REWARDS } from '@/services/supabase/userStatsService';
 import { hasGeminiKey, hasSupabase } from '@/config/env';
 
 /** AI is available if we can reach Gemini directly or via the Supabase proxy. */
@@ -211,6 +212,9 @@ export const useLanguageSession = () => {
             });
             dbSessionId.current = null;
         }
+
+        // Award XP for completing a language session
+        await addXP(XP_REWARDS.LANGUAGE_SESSION, 'language');
 
         toast.success('Session completed! View your summary.');
     };

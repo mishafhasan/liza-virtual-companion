@@ -14,6 +14,7 @@ import {
     closeSession,
     saveTurn,
 } from '@/services/supabase/conversationService';
+import { addXP, XP_REWARDS } from '@/services/supabase/userStatsService';
 import { hasGeminiKey, hasSupabase } from '@/config/env';
 
 /** AI is available if we can reach Gemini directly or via the Supabase proxy. */
@@ -224,6 +225,9 @@ export const useInterviewSession = () => {
             await closeSession(dbSessionId.current, { overallScore });
             dbSessionId.current = null;
         }
+
+        // Award XP for completing a mock interview
+        await addXP(XP_REWARDS.INTERVIEW_SESSION, 'interview');
 
         toast.success('Interview completed!');
     };
