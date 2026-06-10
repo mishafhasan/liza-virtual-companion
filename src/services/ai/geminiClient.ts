@@ -33,7 +33,7 @@ export function getGeminiClient(): GoogleGenAI {
 }
 
 /** Default model used for text-based generation across the app. */
-export const TEXT_MODEL = 'gemini-3.1-flash-lite';
+export const TEXT_MODEL = 'gemma-4-26b-a4b-it';
 
 /** Model used for low-latency native-audio voice sessions. */
 export const VOICE_MODEL = 'gemini-2.5-flash-native-audio-preview-09-2025';

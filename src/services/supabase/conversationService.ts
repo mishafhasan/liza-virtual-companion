@@ -8,6 +8,8 @@
  */
 
 import { getSupabaseClient, isSupabaseEnabled } from './supabaseClient';
+import { generateText } from '@/services/ai/chatService';
+import { toast } from 'sonner';
 import type { AppMode } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -88,6 +90,36 @@ export async function closeSession(
   if (error) {
     console.error('[conversationService] closeSession error:', error.message);
   }
+
+  // Fire-and-forget: summarize the session and store it as a RAG memory.
+  // This replaces per-turn embeddings with a single, precise memory per
+  // conversation.
+  summarizeAndStoreSessionMemory(sessionId).catch((err) =>
+    console.warn('[conversationService] session memory skipped:', (err as Error).message),
+  );
+}
+
+/**
+ * Deletes a session and all its turns (cascade delete).
+ * Throws on any Supabase error so callers can handle it with try/catch.
+ * In local-only mode (no Supabase) this is a no-op and resolves successfully.
+ */
+export async function deleteSession(sessionId: string): Promise<void> {
+  if (!sessionId) throw new Error('No session ID provided');
+  if (!isSupabaseEnabled()) return; // local-only mode: state is handled by caller
+
+  const supabase = await getSupabaseClient();
+  if (!supabase) return;
+
+  const { error } = await supabase
+    .from('conversation_sessions')
+    .delete()
+    .eq('id', sessionId);
+
+  if (error) {
+    console.error('[conversationService] deleteSession error:', error.message);
+    throw new Error(error.message); // re-throw so the caller knows it failed
+  }
 }
 
 /**
@@ -140,8 +172,10 @@ export async function saveTurn(
 
 /**
  * Saves a user turn and an assistant reply together (avoids two round-trips
- * becoming interleaved). After saving, it fires-and-forgets an embedding
- * generation so the exchange lands in the RAG memory store automatically.
+ * becoming interleaved).
+ *
+ * Note: RAG memory is no longer generated per-turn. A single summary
+ * embedding is created when the session is closed (see closeSession).
  */
 export async function saveTurnPair(
   sessionId: string,
@@ -165,12 +199,6 @@ export async function saveTurnPair(
     console.error('[conversationService] saveTurnPair error:', error.message);
     return;
   }
-
-  // Fire-and-forget: generate and store an embedding for this exchange so the
-  // RAG memory (match_memories) can surface it in future context windows.
-  generateAndStoreMemory(supabase, user.id, userContent, lizaContent).catch((err) =>
-    console.warn('[conversationService] embedding skipped:', (err as Error).message),
-  );
 }
 
 // ─── RAG Memory helpers ───────────────────────────────────────────────────────
@@ -225,45 +253,124 @@ export async function retrieveRelevantMemories(
 }
 
 /**
- * Calls the `generate-embedding` Edge Function with a condensed fact string
- * built from the exchange, then upserts the vector into `public.memories`.
- *
- * Runs as a background task (fire-and-forget) so it never blocks the UI.
- * Duplicate facts are silently ignored via the unique constraint.
+ * Shared summarization prompt for extracting memory facts from user messages.
+ * Used by both session-end and mid-conversation (every-5-messages) summarization.
  */
-async function generateAndStoreMemory(
-  supabase: Awaited<ReturnType<typeof getSupabaseClient>>,
-  userId: string,
-  userContent: string,
-  lizaContent: string,
+const MEMORY_SUMMARIZATION_SYSTEM_PROMPT =
+  'You are a concise memory extraction AI. Given a user\'s messages, extract exactly ONE short sentence (max 20 words) capturing the single most important fact about the user. Third person. No extra words.';
+
+/**
+ * Generates an embedding for the given text and stores a memory fact in the
+ * `memories` table. Silently skips when Supabase is unavailable.
+ *
+ * Exported so mid-conversation summarization (every-5-messages) can reuse
+ * the same RAG pipeline without duplicating the embedding & insert logic.
+ */
+export async function embedAndStoreMemory(
+  fact: string,
+  importance = 0.7,
 ): Promise<void> {
+  if (!isSupabaseEnabled()) return;
+  const supabase = await getSupabaseClient();
   if (!supabase) return;
 
-  // Build a compact memory fact from the exchange.
-  const fact = `User: ${userContent.slice(0, 300)}\nLiza: ${lizaContent.slice(0, 300)}`;
+  try {
+    const { data: embData, error: embError } = await supabase.functions.invoke(
+      'generate-embedding',
+      { body: { text: fact } },
+    );
 
-  // Call the Edge Function to get the embedding vector.
-  const { data, error: fnError } = await supabase.functions.invoke('generate-embedding', {
-    body: { text: fact },
-  });
+    if (embError || !embData?.embedding) {
+      console.warn('[conversationService] embed memory embedding failed:', embError?.message);
+      return;
+    }
 
-  if (fnError || !data?.embedding) {
-    throw new Error(fnError?.message ?? 'generate-embedding returned no vector');
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const { error: insertError } = await supabase.from('memories').insert({
+      user_id: user.id,
+      fact,
+      embedding: embData.embedding,
+      importance,
+    });
+
+    if (insertError && insertError.code !== '23505') {
+      console.warn('[conversationService] embed memory store failed:', insertError.message);
+    }
+  } catch (err) {
+    console.warn('[conversationService] embed memory skipped:', (err as Error).message);
   }
+}
 
-  const embedding: number[] = data.embedding;
+/**
+ * Summarizes a batch of user message texts into a concise memory fact using
+ * Gemini, then stores it via {@link embedAndStoreMemory}.
+ *
+ * Used by mid-conversation summarization (every N messages).
+ *
+ * @returns The summary text if successful, or null if skipped/errored.
+ */
+export async function summarizeMessageBatch(
+  userMessages: string[],
+  options?: { importance?: number },
+): Promise<string | null> {
+  if (!userMessages.length) return null;
 
-  // Upsert into memories (duplicate facts are ignored by the unique constraint).
-  const { error: insertError } = await supabase.from('memories').insert({
-    user_id: userId,
-    fact,
-    embedding,
-    importance: 0.5,
-  });
+  const text = userMessages.join('\n').slice(0, 2000);
+  if (!text.trim()) return null;
 
-  // 23505 = unique_violation — the fact already exists, which is fine.
-  if (insertError && insertError.code !== '23505') {
-    throw new Error(insertError.message);
+  try {
+    const summary = await generateText(
+      MEMORY_SUMMARIZATION_SYSTEM_PROMPT,
+      `Conversation messages from the user:\n${text}\n\nExtract ONE short sentence (max 20 words) with the most important fact about the user.`,
+      { maxOutputTokens: 40, temperature: 0.3 },
+    );
+
+    if (!summary) return null;
+
+    // Fire-and-forget the Supabase RAG store (silent if unavailable).
+    embedAndStoreMemory(summary, options?.importance ?? 0.7).catch(() => {});
+
+    return summary;
+  } catch (err) {
+    console.warn('[conversationService] summarizeMessageBatch skipped:', (err as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Loads all turns for a session, uses Gemini to summarize the user's messages
+ * into a concise memory fact, generates an embedding, and stores it in the
+ * memories table for future RAG retrieval.
+ *
+ * Called automatically when a session is closed (see closeSession). Silently
+ * skips sessions with fewer than 2 turns (too short to be meaningful).
+ */
+export async function summarizeAndStoreSessionMemory(
+  sessionId: string,
+): Promise<void> {
+  if (!isSupabaseEnabled() || !sessionId) return;
+  const supabase = await getSupabaseClient();
+  if (!supabase) return;
+
+  const turns = await loadTurns(sessionId);
+  if (turns.length < 2) return;
+
+  const userMessages = turns
+    .filter((t) => t.speaker === 'user')
+    .map((t) => t.content);
+
+  if (!userMessages.length) return;
+
+  // Reuse the batch summarization logic (embedAndStoreMemory handles the RAG insert
+  // and silently skips if Supabase is unavailable).
+  const summary = await summarizeMessageBatch(userMessages);
+
+  if (summary) {
+    toast.success('Memory saved', {
+      description: 'This conversation\'s key facts are now stored for future context.',
+    });
   }
 }
 
