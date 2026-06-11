@@ -110,7 +110,7 @@ export const useSettingsStore = create<SettingsStore>()(
           updates.characterProfile = {
             name: characterRow.name ?? DEFAULT_CHARACTER_PROFILE.name,
             personality: characterRow.personality ?? DEFAULT_CHARACTER_PROFILE.personality,
-            avatar: characterRow.avatar_image ?? undefined,
+            avatar: characterRow.avatar_image || get().characterProfile.avatar,
           };
         }
 
@@ -155,7 +155,7 @@ export const useSettingsStore = create<SettingsStore>()(
         if (!user) return;
 
         const merged = get().characterProfile;
-        await supabase.from('character_profiles').upsert(
+        const { error } = await supabase.from('character_profiles').upsert(
           {
             user_id: user.id,
             name: merged.name,
@@ -164,6 +164,7 @@ export const useSettingsStore = create<SettingsStore>()(
           },
           { onConflict: 'user_id' },
         );
+        if (error) console.error("Supabase upsert error:", error);
       },
 
       // ─── Memory (local only for now) ──────────────────────────────────────
