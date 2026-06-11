@@ -32,6 +32,12 @@ export interface DBTurn {
   created_at: string;
 }
 
+export interface MemorySummaryResult {
+  summary: string;
+  persisted: boolean;
+  supabaseConfigured: boolean;
+}
+
 // ─── Session helpers ──────────────────────────────────────────────────────────
 
 /**
@@ -269,10 +275,10 @@ const MEMORY_SUMMARIZATION_SYSTEM_PROMPT =
 export async function embedAndStoreMemory(
   fact: string,
   importance = 0.7,
-): Promise<void> {
-  if (!isSupabaseEnabled()) return;
+): Promise<boolean> {
+  if (!isSupabaseEnabled()) return false;
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
+  if (!supabase) return false;
 
   try {
     const { data: embData, error: embError } = await supabase.functions.invoke(
@@ -282,24 +288,36 @@ export async function embedAndStoreMemory(
 
     if (embError || !embData?.embedding) {
       console.warn('[conversationService] embed memory embedding failed:', embError?.message);
-      return;
+      return false;
     }
 
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+      console.warn('[conversationService] embed memory auth failed:', authError?.message);
+      return false;
+    }
 
-    const { error: insertError } = await supabase.from('memories').insert({
-      user_id: user.id,
-      fact,
-      embedding: embData.embedding,
-      importance,
-    });
+    // Upsert so duplicate facts (same user + same fact text) silently update
+    // rather than returning a 409 conflict from PostgREST.
+    const { error: insertError } = await supabase.from('memories').upsert(
+      {
+        user_id: user.id,
+        fact,
+        embedding: embData.embedding,
+        importance,
+      },
+      { onConflict: 'user_id,fact' },
+    );
 
-    if (insertError && insertError.code !== '23505') {
+    if (insertError) {
       console.warn('[conversationService] embed memory store failed:', insertError.message);
+      return false;
     }
+
+    return true;
   } catch (err) {
     console.warn('[conversationService] embed memory skipped:', (err as Error).message);
+    return false;
   }
 }
 
@@ -309,12 +327,12 @@ export async function embedAndStoreMemory(
  *
  * Used by mid-conversation summarization (every N messages).
  *
- * @returns The summary text if successful, or null if skipped/errored.
+ * @returns The summary text plus whether it was persisted to Supabase, or null if skipped/errored.
  */
 export async function summarizeMessageBatch(
   userMessages: string[],
   options?: { importance?: number },
-): Promise<string | null> {
+): Promise<MemorySummaryResult | null> {
   if (!userMessages.length) return null;
 
   const text = userMessages.join('\n').slice(0, 2000);
@@ -329,10 +347,12 @@ export async function summarizeMessageBatch(
 
     if (!summary) return null;
 
-    // Fire-and-forget the Supabase RAG store (silent if unavailable).
-    embedAndStoreMemory(summary, options?.importance ?? 0.7).catch(() => {});
+    const supabaseConfigured = isSupabaseEnabled();
+    const persisted = supabaseConfigured
+      ? await embedAndStoreMemory(summary, options?.importance ?? 0.7)
+      : false;
 
-    return summary;
+    return { summary, persisted, supabaseConfigured };
   } catch (err) {
     console.warn('[conversationService] summarizeMessageBatch skipped:', (err as Error).message);
     return null;
@@ -365,12 +385,18 @@ export async function summarizeAndStoreSessionMemory(
 
   // Reuse the batch summarization logic (embedAndStoreMemory handles the RAG insert
   // and silently skips if Supabase is unavailable).
-  const summary = await summarizeMessageBatch(userMessages);
+  const result = await summarizeMessageBatch(userMessages);
 
-  if (summary) {
-    toast.success('Memory saved', {
-      description: 'This conversation\'s key facts are now stored for future context.',
-    });
+  if (result?.summary) {
+    if (result.persisted) {
+      toast.success('Memory saved', {
+        description: 'This conversation\'s key facts are now stored for future context.',
+      });
+    } else {
+      toast.error('Memory not stored in Supabase', {
+        description: 'The memory was summarized locally, but the Supabase insert failed. Check the console for embedding or RLS errors.',
+      });
+    }
   }
 }
 

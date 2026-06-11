@@ -56,7 +56,13 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
     // immediately when the page mounts (or remounts on route navigation).
     const loadHistory = useCallback(async (selectId?: string) => {
         const sessions = await loadSessions('entertainment', 30);
-        if (sessions.length === 0) return;
+
+        // Always reset to a clean slate so navigating back never shows stale state.
+        if (sessions.length === 0) {
+            setConversations([]);
+            setCurrentConversation(null);
+            return;
+        }
 
         const convs: Conversation[] = sessions.map((s) => ({
             id: s.id,
@@ -432,17 +438,27 @@ async function summarizeRecentContext(
     const texts = userMessages.map((m) => m.content);
 
     // Summarize via Gemini — returns null if AI is unavailable.
-    const summary = await summarizeMessageBatch(texts);
-    if (!summary) return null;
+    const result = await summarizeMessageBatch(texts);
+    if (!result) return null;
 
     // Save to local Zustand memory (works in all modes).
     const addMemory = useSettingsStore.getState().addMemory;
-    addMemory({ id: 'mem-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6), fact: summary });
+    addMemory({ id: 'mem-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6), fact: result.summary });
 
-    // Notify the user that key facts have been stored for future context.
-    toast.success('Memory saved', {
-      description: "This conversation's key facts are now stored for future context.",
-    });
+    // Notify the user based on the actual Supabase persistence result.
+    if (result.persisted) {
+      toast.success('Memory saved', {
+        description: "This conversation's key facts are now stored for future context.",
+      });
+    } else if (result.supabaseConfigured) {
+      toast.error('Memory not stored in Supabase', {
+        description: 'The memory was summarized locally, but the Supabase insert failed. Check the console for embedding or RLS errors.',
+      });
+    } else {
+      toast.success('Memory saved locally', {
+        description: 'Supabase is not configured, so this memory is only stored in this browser.',
+      });
+    }
 
     // Return the new index (total user messages processed so far) so the
     // caller can advance lastSummarizedIndexRef. Count all user messages

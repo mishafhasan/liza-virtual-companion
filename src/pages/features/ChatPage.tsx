@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useLocation } from 'react-router-dom';
 import { useAuth } from '@/stores/authStore';
 import { useSettings } from '@/stores/settingsStore';
 import { useChatSession } from '@/hooks/useChatSession';
@@ -40,7 +40,8 @@ export const ChatPage: React.FC = () => {
     const [voiceConversation, setVoiceConversation] = useState<ConversationTurn[]>([]);
     const voiceSessionIdRef = useRef<string | null>(null);
     const voiceSessionTitleRef = useRef(false);
-    const hasInitializedRef = useRef(false);
+
+    const location = useLocation();
 
     // Emotion state management for intelligent mood adaptation
     const { emotionState, processUserInput, resetEmotionState } = useEmotionState();
@@ -85,14 +86,11 @@ export const ChatPage: React.FC = () => {
         loadHistory,
     } = useChatSession({ systemInstructionOverride: textSystemInstruction });
 
-    // Load past conversations from Supabase on mount, then handle session param.
-    // The `hasInitializedRef` guard ensures this runs exactly once even when the
-    // component remounts after route navigation (dashboard → chat).
-    // `loadHistory` now handles auto-selection and loads turns immediately,
-    // so the chat area shows content without requiring a sidebar click.
+    // Reload conversation history every time the user navigates to /chat.
+    // Using location.pathname as the dependency ensures this fires on each
+    // visit (initial mount, back navigation, dashboard → chat), not just once.
     useEffect(() => {
-        if (hasInitializedRef.current) return;
-        hasInitializedRef.current = true;
+        if (location.pathname !== '/chat') return;
 
         const sessionId = searchParams.get('session');
         loadHistory(sessionId ?? undefined).then(() => {
@@ -101,7 +99,7 @@ export const ChatPage: React.FC = () => {
             }
         });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [location.pathname]);
 
     // Wrapper around sendMessage to also run emotion analysis on typed text
     const handleSendMessage = useCallback(() => {
