@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { generateChatReply, type ChatTurn } from '@/services/ai/chatService';
 import {
     createSession,
@@ -13,11 +13,86 @@ import {
 } from '@/services/supabase/conversationService';
 import { addXP, updateRecentActivity, XP_REWARDS } from '@/services/supabase/userStatsService';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { useAuthStore } from '@/stores/authStore';
 import { toast } from 'sonner';
-import type { Conversation, Message, AIPersonality } from '@/types';
+import type { Conversation, Message, AIPersonality, MessageRole } from '@/types';
 
 interface UseChatSessionOptions {
     systemInstructionOverride?: string;
+}
+
+// ─── Module-level cache for sessions and turns ──────────────────────────────
+// Shared across all hook instances so navigating between pages re-uses data.
+// Each entry is keyed by user ID so switching accounts never leaks data.
+
+const CACHE_TTL_MS = 30_000;
+
+interface SessionsCache {
+    sessions: Conversation[];
+    timestamp: number;
+    userId: string;
+}
+
+interface TurnsCache {
+    messages: Message[];
+    timestamp: number;
+    userId: string;
+}
+
+const cachedSessionsByUser = new Map<string, SessionsCache>();
+const cachedTurnsByUser = new Map<string, Map<string, TurnsCache>>();
+
+function getCurrentUserId(): string {
+    return useAuthStore.getState().user?.id ?? 'anonymous';
+}
+
+function getSessionsCache(): SessionsCache | null {
+    const userId = getCurrentUserId();
+    const cache = cachedSessionsByUser.get(userId);
+    if (!cache) return null;
+    if (Date.now() - cache.timestamp > CACHE_TTL_MS) {
+        cachedSessionsByUser.delete(userId);
+        return null;
+    }
+    return cache;
+}
+
+function setSessionsCache(sessions: Conversation[]) {
+    const userId = getCurrentUserId();
+    cachedSessionsByUser.set(userId, { sessions, timestamp: Date.now(), userId });
+}
+
+function getTurnsCache(sessionId: string): TurnsCache | null {
+    const userId = getCurrentUserId();
+    const userCache = cachedTurnsByUser.get(userId);
+    if (!userCache) return null;
+    const cache = userCache.get(sessionId);
+    if (!cache) return null;
+    if (Date.now() - cache.timestamp > CACHE_TTL_MS) {
+        userCache.delete(sessionId);
+        return null;
+    }
+    return cache;
+}
+
+function setTurnsCache(sessionId: string, messages: Message[]) {
+    const userId = getCurrentUserId();
+    let userCache = cachedTurnsByUser.get(userId);
+    if (!userCache) {
+        userCache = new Map();
+        cachedTurnsByUser.set(userId, userCache);
+    }
+    userCache.set(sessionId, { messages, timestamp: Date.now(), userId });
+}
+
+function invalidateSessionsCache() {
+    cachedSessionsByUser.delete(getCurrentUserId());
+}
+
+function invalidateTurnsCache(sessionId: string) {
+    const userId = getCurrentUserId();
+    const userCache = cachedTurnsByUser.get(userId);
+    if (userCache) userCache.delete(sessionId);
 }
 
 /**
@@ -25,9 +100,12 @@ interface UseChatSessionOptions {
  *
  * Conversation sessions and turns are persisted to Supabase when configured.
  * In local-only mode everything stays in memory exactly as before.
+ *
+ * Session and turn lists are cached with a 30-second TTL so navigating back
+ * to /chat from /settings or /dashboard shows history instantly.
  */
 export const useChatSession = (options?: UseChatSessionOptions) => {
-    const [conversations, setConversations] = useState<Conversation[]>([]);
+    const [conversations, setConversations] = useState<Conversation[]>(getSessionsCache()?.sessions ?? []);
     const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null);
     const [chatLoading, setChatLoading] = useState(false);
     const [input, setInput] = useState('');
@@ -36,6 +114,9 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
 
     // Tracks the active Supabase session UUID for the current conversation.
     const dbSessionId = useRef<string | null>(null);
+
+    /** Guard to prevent state updates after unmount. */
+    const isMountedRef = useRef(true);
 
     // ─── Mid-conversation memory summarization ───────────────────────────
     //
@@ -54,24 +135,38 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
     // selected and its turns are loaded. Otherwise the most recent conversation
     // is auto-selected. This ensures the chat area shows real content
     // immediately when the page mounts (or remounts on route navigation).
+    //
+    // Uses a 30-second module-level cache so navigating back to /chat from
+    // another page shows the sidebar instantly without refetching.
     const loadHistory = useCallback(async (selectId?: string) => {
-        const sessions = await loadSessions('entertainment', 30);
+        // Use cached sessions if they are fresh.
+        let convs: Conversation[];
+        const sessionsCache = getSessionsCache();
 
-        // Always reset to a clean slate so navigating back never shows stale state.
-        if (sessions.length === 0) {
-            setConversations([]);
-            setCurrentConversation(null);
-            return;
+        if (sessionsCache) {
+            convs = sessionsCache.sessions;
+        } else {
+            const sessions = await loadSessions('entertainment', 30);
+            if (sessions.length === 0) {
+                if (isMountedRef.current) {
+                    setConversations([]);
+                    setCurrentConversation(null);
+                }
+                invalidateSessionsCache();
+                return;
+            }
+            convs = sessions.map((s) => ({
+                id: s.id,
+                title: s.title ?? 'Conversation',
+                messages: [],          // turns loaded lazily on selectConversation
+                createdAt: new Date(s.started_at),
+                updatedAt: new Date(s.ended_at ?? s.started_at),
+                mode: 'entertainment',
+            }));
+            setSessionsCache(convs);
         }
 
-        const convs: Conversation[] = sessions.map((s) => ({
-            id: s.id,
-            title: s.title ?? 'Conversation',
-            messages: [],          // turns loaded lazily on selectConversation
-            createdAt: new Date(s.started_at),
-            updatedAt: new Date(s.ended_at ?? s.started_at),
-            mode: 'entertainment',
-        }));
+        if (!isMountedRef.current) return;
         setConversations(convs);
 
         // Determine which conversation to select
@@ -81,15 +176,26 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         const target = convs.find((c) => c.id === targetId) ?? convs[0];
         dbSessionId.current = target.id;
 
-        // Load turns so the chat area shows messages immediately
+        // Load turns — use cached turns if fresh, otherwise hit the DB.
+        const turnsCache = getTurnsCache(target.id);
+
+        if (turnsCache) {
+            if (isMountedRef.current) {
+                setCurrentConversation({ ...target, messages: turnsCache.messages });
+            }
+            return;
+        }
+
         const turns = await loadTurns(target.id);
+        if (!isMountedRef.current) return;
         if (turns.length > 0) {
             const messages: Message[] = turns.map((t) => ({
                 id: t.id,
-                role: t.speaker === 'user' ? 'user' : 'assistant',
+                role: (t.speaker === 'user' ? 'user' : 'assistant') as MessageRole,
                 content: t.content,
                 timestamp: new Date(t.created_at),
             }));
+            setTurnsCache(target.id, messages);
             setCurrentConversation({ ...target, messages });
         } else {
             setCurrentConversation(target);
@@ -110,7 +216,7 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
     // ─── Create new conversation ──────────────────────────────────────────
     const createConversation = useCallback(async () => {
         const oldDbSessionId = dbSessionId.current;
-        
+
         const newConv: Conversation = {
             id: 'conv-' + Date.now(),
             title: 'New Conversation',
@@ -129,6 +235,9 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         setConversations(prev => [newConv, ...prev]);
         setCurrentConversation(newConv);
         if (!sidebarOpen) setSidebarOpen(true);
+
+        // Invalidate the sessions cache so the next loadHistory sees the new chat.
+        invalidateSessionsCache();
 
         try {
             // Close any existing session in the background
@@ -173,24 +282,26 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         if (!conversation) {
             const title = content.slice(0, 40) + (content.length > 40 ? '…' : '');
             const sid = await createSession('entertainment', title);
-            const newConv: Conversation = {
-                id: sid ?? ('conv-' + Date.now()),
-                title,
-                messages: [],
-                createdAt: new Date(),
-                updatedAt: new Date(),
-                mode: 'entertainment',
-            };
-            if (sid) {
-                dbSessionId.current = sid;
-                // Award XP for starting a conversation
-                await addXP(XP_REWARDS.CONVERSATION_STARTED, 'entertainment');
-                // Track as recent activity
-                await updateRecentActivity('entertainment', sid);
-            }
-            conversation = newConv;
-            setConversations(prev => [newConv, ...prev]);
-            setCurrentConversation(newConv);
+        const newConv: Conversation = {
+            id: sid ?? ('conv-' + Date.now()),
+            title,
+            messages: [],
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            mode: 'entertainment',
+        };
+        if (sid) {
+            dbSessionId.current = sid;
+            // Award XP for starting a conversation
+            await addXP(XP_REWARDS.CONVERSATION_STARTED, 'entertainment');
+            // Track as recent activity
+            await updateRecentActivity('entertainment', sid);
+        }
+        // New conversation must not be hidden by stale cache.
+        invalidateSessionsCache();
+        conversation = newConv;
+        setConversations(prev => [newConv, ...prev]);
+        setCurrentConversation(newConv);
         }
 
         const userMessage: Message = {
@@ -205,6 +316,16 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         setCurrentConversation(updatedConv);
         setConversations(prev => prev.map(c => c.id === updatedConv.id ? updatedConv : c));
 
+        // Keep the sessions cache updated so sidebar ordering stays fresh.
+        const sessionsCache = getSessionsCache();
+        if (sessionsCache) {
+            setSessionsCache(
+                sessionsCache.sessions.map(c =>
+                    c.id === updatedConv.id ? { ...c, updatedAt: updatedConv.updatedAt } : c,
+                ),
+            );
+        }
+
         // Update title from first real message if still generic.
         if (
             conversation.title === 'New Conversation' &&
@@ -216,6 +337,15 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
             setConversations(prev =>
                 prev.map(c => c.id === updatedConv.id ? { ...c, title } : c),
             );
+            // Keep the sessions cache in sync so the sidebar title is fresh.
+            const sessionsCache = getSessionsCache();
+            if (sessionsCache) {
+                setSessionsCache(
+                    sessionsCache.sessions.map(c =>
+                        c.id === updatedConv.id ? { ...c, title } : c,
+                    ),
+                );
+            }
         }
 
         setChatLoading(true);
@@ -253,6 +383,11 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
             const finalConv = { ...updatedConv, messages: finalMessages };
             setCurrentConversation(finalConv);
             setConversations(prev => prev.map(c => c.id === finalConv.id ? finalConv : c));
+
+            // Keep the turns cache in sync so navigation back shows the latest messages.
+            if (dbSessionId.current) {
+                setTurnsCache(dbSessionId.current, finalMessages);
+            }
 
             // Persist both turns together.
             if (dbSessionId.current) {
@@ -299,6 +434,14 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         }
     }, [input, currentConversation, personality, getPersonalityPrompt, options?.systemInstructionOverride]);
 
+    // ─── Cleanup on unmount ─────────────────────────────────────────────
+    useEffect(() => {
+        isMountedRef.current = true;
+        return () => {
+            isMountedRef.current = false;
+        };
+    }, []);
+
     // ─── Select an existing conversation (lazy-loads turns) ──────────────
     const selectConversation = useCallback(async (id: string) => {
         // Close current session and reset mid-conversation counters.
@@ -314,13 +457,20 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
 
         // If not found in local state, try to load from DB directly (e.g., Resume from dashboard)
         if (!conv) {
-            const turns = await loadTurns(id);
-            const messages: Message[] = turns.map(t => ({
-                id: t.id,
-                role: t.speaker === 'user' ? 'user' : 'assistant',
-                content: t.content,
-                timestamp: new Date(t.created_at),
-            }));
+            const turnsCache = getTurnsCache(id);
+            const messages: Message[] = turnsCache
+                ? turnsCache.messages
+                : (await loadTurns(id)).map(t => ({
+                    id: t.id,
+                    role: (t.speaker === 'user' ? 'user' : 'assistant') as MessageRole,
+                    content: t.content,
+                    timestamp: new Date(t.created_at),
+                }));
+
+            if (!turnsCache && messages.length > 0) {
+                setTurnsCache(id, messages);
+            }
+
             const fetchedConv: Conversation = {
                 id,
                 title: 'Conversation',
@@ -339,16 +489,28 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
             return;
         }
 
-        // If messages haven't been loaded yet, fetch from DB.
+        // If messages haven't been loaded yet, use cache or fetch from DB.
         if (conv.messages.length === 0) {
+            const turnsCache = getTurnsCache(id);
+
+            if (turnsCache) {
+                const loaded = { ...conv, messages: turnsCache.messages };
+                setConversations(prev => prev.map(c => c.id === id ? loaded : c));
+                setCurrentConversation(loaded);
+                dbSessionId.current = id;
+                await updateRecentActivity('entertainment', id);
+                return;
+            }
+
             const turns = await loadTurns(id);
             if (turns.length > 0) {
                 const messages: Message[] = turns.map(t => ({
                     id: t.id,
-                    role: t.speaker === 'user' ? 'user' : 'assistant',
+                    role: (t.speaker === 'user' ? 'user' : 'assistant') as MessageRole,
                     content: t.content,
                     timestamp: new Date(t.created_at),
                 }));
+                setTurnsCache(id, messages);
                 const loaded = { ...conv, messages };
                 setConversations(prev => prev.map(c => c.id === id ? loaded : c));
                 setCurrentConversation(loaded);
@@ -380,6 +542,10 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
             setCurrentConversation(null);
             dbSessionId.current = null;
         }
+
+        // Invalidate caches so the next loadHistory doesn't show the deleted chat.
+        invalidateSessionsCache();
+        invalidateTurnsCache(id);
 
         try {
             await deleteSession(id);
