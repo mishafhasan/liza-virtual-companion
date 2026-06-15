@@ -21,6 +21,8 @@ interface SettingsStore {
   memory: MemoryItem[];
   /** True once the initial cloud load has completed (or Supabase is absent). */
   cloudLoaded: boolean;
+  /** The last user ID for whom cloud data was loaded. Prevents re-loading on every navigation. */
+  lastCloudLoadedUserId: string | null;
   updateSettings: (updates: Partial<Settings>) => Promise<void>;
   updateCharacterProfile: (updates: Partial<CharacterProfile>) => Promise<void>;
   addMemory: (item: MemoryItem) => void;
@@ -36,50 +38,26 @@ export const useSettingsStore = create<SettingsStore>()(
       characterProfile: DEFAULT_CHARACTER_PROFILE,
       memory: [],
       cloudLoaded: false,
+      lastCloudLoadedUserId: null,
 
       // ─── Load from cloud ──────────────────────────────────────────────────
       loadFromCloud: async (userId: string) => {
-        if (!isSupabaseEnabled()) {
+        // If we've already loaded for this user, skip to avoid redundant network calls.
+        if (get().lastCloudLoadedUserId === userId) {
           set({ cloudLoaded: true });
           return;
         }
 
+        if (!isSupabaseEnabled()) {
+          set({ cloudLoaded: true, lastCloudLoadedUserId: userId });
+          return;
+        }
+
         const supabase = await getSupabaseClient();
-        if (!supabase) { set({ cloudLoaded: true }); return; }
+        if (!supabase) { set({ cloudLoaded: true, lastCloudLoadedUserId: userId }); return; }
 
-        const s = get().settings;
-        const cp = get().characterProfile;
-
-        // Upsert defaults so the row always exists after first login.
-        // `ignoreDuplicates: false` means an existing row is returned as-is
-        // (the SELECT below fetches the actual current values).
-        await Promise.all([
-          supabase.from('user_settings').upsert(
-            {
-              user_id: userId,
-              language: s.language,
-              voice_name: s.voiceName,
-              flirt_intensity: s.flirtIntensity,
-              emotion_intensity: s.emotionIntensity,
-              video_mode: s.videoMode,
-              avatar_id: s.avatarId ?? 'default',
-            },
-            { onConflict: 'user_id', ignoreDuplicates: true },
-          ),
-          supabase.from('character_profiles').upsert(
-            {
-              user_id: userId,
-              name: cp.name,
-              personality: cp.personality,
-              avatar_image: cp.avatar ?? null,
-            },
-            { onConflict: 'user_id', ignoreDuplicates: true },
-          ),
-        ]);
-
-        // Now read back the canonical values (may differ if user had saved
-        // settings from a previous session on another device).
-        const [{ data: settingsRow }, { data: characterRow }] = await Promise.all([
+        // Read first — only upsert if the row is missing. This avoids unnecessary writes.
+        const [{ data: settingsRow, error: settingsErr }, { data: characterRow, error: characterErr }] = await Promise.all([
           supabase
             .from('user_settings')
             .select('language, voice_name, flirt_intensity, emotion_intensity, video_mode, avatar_id')
@@ -92,7 +70,48 @@ export const useSettingsStore = create<SettingsStore>()(
             .single(),
         ]);
 
-        const updates: Partial<SettingsStore> = { cloudLoaded: true };
+        // If we hit a real network error (not just "row not found"), don't mark as loaded
+        // so the next navigation will retry.
+        const settingsFailed = settingsErr && settingsErr.code !== 'PGRST116';
+        const characterFailed = characterErr && characterErr.code !== 'PGRST116';
+        if (settingsFailed || characterFailed) {
+          console.error('[settingsStore] loadFromCloud failed:', settingsErr?.message || characterErr?.message);
+          return;
+        }
+
+        const s = get().settings;
+        const cp = get().characterProfile;
+        const updates: Partial<SettingsStore> = {
+          cloudLoaded: true,
+          lastCloudLoadedUserId: userId,
+        };
+
+        // If missing, upsert defaults so the row exists for future writes.
+        if (settingsErr?.code === 'PGRST116') {
+          await supabase.from('user_settings').upsert(
+            {
+              user_id: userId,
+              language: s.language,
+              voice_name: s.voiceName,
+              flirt_intensity: s.flirtIntensity,
+              emotion_intensity: s.emotionIntensity,
+              video_mode: s.videoMode,
+              avatar_id: s.avatarId ?? 'default',
+            },
+            { onConflict: 'user_id' },
+          );
+        }
+        if (characterErr?.code === 'PGRST116') {
+          await supabase.from('character_profiles').upsert(
+            {
+              user_id: userId,
+              name: cp.name,
+              personality: cp.personality,
+              avatar_image: cp.avatar ?? null,
+            },
+            { onConflict: 'user_id' },
+          );
+        }
 
         if (settingsRow) {
           updates.settings = {
@@ -177,11 +196,13 @@ export const useSettingsStore = create<SettingsStore>()(
     {
       name: 'liza-app-state',
       version: 1,
-      // Don't persist cloudLoaded — always re-check on mount.
+      // Persist lastCloudLoadedUserId so we don't re-fetch on every navigation.
+      // cloudLoaded is NOT persisted so a fresh tab still re-verifies.
       partialize: (state) => ({
         settings: state.settings,
         characterProfile: state.characterProfile,
         memory: state.memory,
+        lastCloudLoadedUserId: state.lastCloudLoadedUserId,
       }),
     },
   ),

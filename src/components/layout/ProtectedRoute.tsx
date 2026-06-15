@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Navigate, Outlet } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
@@ -13,6 +13,10 @@ import { useSettingsStore } from '@/stores/settingsStore';
  *
  * Once the user is confirmed, `loadFromCloud()` hydrates settings and character
  * profile from Supabase (no-op in local-only mode).
+ *
+ * The auth initializer is only called once globally; settings are only loaded once
+ * per user so navigating between /dashboard and /settings does not trigger
+ * redundant network requests.
  */
 export const ProtectedRoute: React.FC = () => {
   const user = useAuthStore((s) => s.user);
@@ -21,16 +25,29 @@ export const ProtectedRoute: React.FC = () => {
 
   const cloudLoaded = useSettingsStore((s) => s.cloudLoaded);
   const loadFromCloud = useSettingsStore((s) => s.loadFromCloud);
+  const lastCloudLoadedUserId = useSettingsStore((s) => s.lastCloudLoadedUserId);
+
+  const hasInitialized = useRef(false);
+  const isLoadingCloud = useRef(false);
 
   useEffect(() => {
-    initialize();
+    if (!hasInitialized.current) {
+      hasInitialized.current = true;
+      initialize();
+    }
   }, [initialize]);
 
   useEffect(() => {
-    if (user && !cloudLoaded) {
-      loadFromCloud(user.id);
+    if (user && !cloudLoaded && lastCloudLoadedUserId !== user.id) {
+      // Prevent StrictMode double-fires and duplicate in-flight requests.
+      if (!isLoadingCloud.current) {
+        isLoadingCloud.current = true;
+        loadFromCloud(user.id).finally(() => {
+          isLoadingCloud.current = false;
+        });
+      }
     }
-  }, [user, cloudLoaded, loadFromCloud]);
+  }, [user, cloudLoaded, lastCloudLoadedUserId, loadFromCloud]);
 
   // Still checking session — show a centered spinner.
   if (!initialized) {

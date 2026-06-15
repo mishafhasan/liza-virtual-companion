@@ -4,6 +4,9 @@
  * Provides methods for awarding XP, updating streaks, and managing recent
  * activity. Global time tracking is handled by AppLayout — this hook only
  * loads and exposes stats data.
+ *
+ * Uses a module-level cache with a 30-second TTL so navigating between
+ * settings and dashboard does not trigger fresh network requests every time.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -33,6 +36,17 @@ const EMPTY_STATS: UserStats = {
   interview_xp: 0,
 };
 
+interface CachedSnapshot {
+  stats: UserStats;
+  displayName: string;
+  recentActivity: RecentActivity | null;
+  timestamp: number;
+}
+
+// Module-level cache so every instance of the hook shares the same data.
+let cachedSnapshot: CachedSnapshot | null = null;
+const CACHE_TTL_MS = 30_000; // 30 seconds
+
 export const useUserStats = () => {
   const [stats, setStats] = useState<UserStats | null>(EMPTY_STATS);
   const [displayName, setDisplayName] = useState<string>('Explorer');
@@ -40,26 +54,73 @@ export const useUserStats = () => {
   const [recentActivity, setRecentActivity] = useState<RecentActivity | null>(null);
 
   const activitySessionId = useRef<string | null>(null);
+  const isMounted = useRef(true);
 
   // ─── Load user stats and name ─────────────────────────────────────────────
-  const loadStats = useCallback(async () => {
-    setLoading(true);
+  const loadStats = useCallback(async (opts?: { background?: boolean }) => {
+    const background = opts?.background ?? false;
+
+    // If we have a fresh cache, hydrate from it immediately without showing a spinner.
+    if (cachedSnapshot && Date.now() - cachedSnapshot.timestamp < CACHE_TTL_MS) {
+      if (!background) {
+        setStats(cachedSnapshot.stats);
+        setDisplayName(cachedSnapshot.displayName);
+        setRecentActivity(cachedSnapshot.recentActivity);
+        setLoading(false);
+      }
+      // Still fetch in the background if the cache is stale (handled below).
+      return;
+    }
+
+    if (!background) setLoading(true);
+
     try {
       const snapshot = await getDashboardStatsSnapshot();
-      setStats(snapshot.stats);
-      setDisplayName(snapshot.displayName);
-      setRecentActivity(snapshot.recentActivity);
+      const payload: CachedSnapshot = {
+        stats: snapshot.stats,
+        displayName: snapshot.displayName,
+        recentActivity: snapshot.recentActivity,
+        timestamp: Date.now(),
+      };
+      cachedSnapshot = payload;
+
+      if (isMounted.current) {
+        setStats(snapshot.stats);
+        setDisplayName(snapshot.displayName);
+        setRecentActivity(snapshot.recentActivity);
+      }
+    } catch (e) {
+      console.error('[useUserStats] loadStats failed:', e);
+      // On failure, keep any existing cached data so the UI isn't blank.
+      if (cachedSnapshot && isMounted.current) {
+        setStats(cachedSnapshot.stats);
+        setDisplayName(cachedSnapshot.displayName);
+        setRecentActivity(cachedSnapshot.recentActivity);
+      }
     } finally {
-      setLoading(false);
+      if (isMounted.current && !background) {
+        setLoading(false);
+      }
     }
   }, []);
 
   // ─── Initialize on mount ──────────────────────────────────────────────────
   useEffect(() => {
-    loadStats();
+    isMounted.current = true;
+
+    // If we have a recent cache, show it immediately and skip the loading state.
+    if (cachedSnapshot && Date.now() - cachedSnapshot.timestamp < CACHE_TTL_MS) {
+      setStats(cachedSnapshot.stats);
+      setDisplayName(cachedSnapshot.displayName);
+      setRecentActivity(cachedSnapshot.recentActivity);
+      setLoading(false);
+    } else {
+      loadStats();
+    }
 
     // Cleanup on unmount — end any active activity session
     return () => {
+      isMounted.current = false;
       if (activitySessionId.current) {
         endActivitySession(activitySessionId.current, 0);
       }
@@ -70,7 +131,7 @@ export const useUserStats = () => {
   const awardXP = useCallback(
     async (amount: number, mode?: AppMode) => {
       await addXP(amount, mode);
-      await loadStats(); // Refresh stats
+      await loadStats({ background: true }); // Refresh stats in background
     },
     [loadStats]
   );
@@ -87,7 +148,7 @@ export const useUserStats = () => {
       if (activitySessionId.current) {
         await endActivitySession(activitySessionId.current, xpEarned);
         activitySessionId.current = null;
-        await loadStats(); // Refresh stats
+        await loadStats({ background: true }); // Refresh stats in background
       }
     },
     [loadStats]
@@ -97,7 +158,7 @@ export const useUserStats = () => {
   const trackConversation = useCallback(
     async (mode: TrackedMode, conversationId: string) => {
       await updateRecentActivity(mode, conversationId);
-      await loadStats(); // Refresh recent activity
+      await loadStats({ background: true }); // Refresh recent activity in background
     },
     [loadStats]
   );
