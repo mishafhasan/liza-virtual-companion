@@ -8,7 +8,7 @@
  *
  * Two key sources exist for historical reasons:
  *  - `process.env.*`  -> injected at build time by Vite `define` (see vite.config.ts).
- *                        Used for the AI provider keys (Gemini, Stability).
+ *                        Used for the AI provider keys (Gemini, Pollinations).
  *  - `import.meta.env.VITE_*` -> standard Vite client env. Used for Supabase,
  *                        which is safe to expose (protected by Row Level Security).
  */
@@ -32,8 +32,8 @@ export const env = {
   /** Google Gemini API key — powers text chat, voice, language and interview AI. */
   geminiApiKey: readProcessEnv('GEMINI_API_KEY') || readProcessEnv('API_KEY'),
 
-  /** Stability AI key — optional, used only for avatar image generation. */
-  stabilityApiKey: readProcessEnv('STABILITY_API_KEY'),
+  /** Pollinations.ai key — optional. When absent, the free public endpoint is used. */
+  pollinationsApiKey: readProcessEnv('POLLINATIONS_API_KEY'),
 
   /** Supabase project URL (safe to expose; RLS protects the data). */
   supabaseUrl: readViteEnv('VITE_SUPABASE_URL'),

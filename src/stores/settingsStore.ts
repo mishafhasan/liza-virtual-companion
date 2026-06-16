@@ -7,8 +7,9 @@ import { DEFAULT_SETTINGS, DEFAULT_CHARACTER_PROFILE } from '@/constants';
 /**
  * Settings store (Zustand).
  *
- * When Supabase is configured, settings and character profile are synced to
- * `user_settings` and `character_profiles` tables (upserted on every change).
+ * When Supabase is configured, settings, character profile, and long-term
+ * memories are synced to `user_settings`, `character_profiles`, and `memories`
+ * tables respectively (upserted on every change).
  * On first load `loadFromCloud()` is called to hydrate the store from the DB,
  * overriding any stale localStorage values.
  *
@@ -57,7 +58,7 @@ export const useSettingsStore = create<SettingsStore>()(
         if (!supabase) { set({ cloudLoaded: true, lastCloudLoadedUserId: userId }); return; }
 
         // Read first — only upsert if the row is missing. This avoids unnecessary writes.
-        const [{ data: settingsRow, error: settingsErr }, { data: characterRow, error: characterErr }] = await Promise.all([
+        const [{ data: settingsRow, error: settingsErr }, { data: characterRow, error: characterErr }, { data: memoriesRows, error: memoriesErr }] = await Promise.all([
           supabase
             .from('user_settings')
             .select('language, voice_name, flirt_intensity, emotion_intensity, video_mode, avatar_id')
@@ -68,14 +69,19 @@ export const useSettingsStore = create<SettingsStore>()(
             .select('name, personality, avatar_image')
             .eq('user_id', userId)
             .single(),
+          supabase
+            .from('memories')
+            .select('id, fact, created_at')
+            .eq('user_id', userId)
+            .order('created_at', { ascending: true }),
         ]);
 
         // If we hit a real network error (not just "row not found"), don't mark as loaded
         // so the next navigation will retry.
         const settingsFailed = settingsErr && settingsErr.code !== 'PGRST116';
         const characterFailed = characterErr && characterErr.code !== 'PGRST116';
-        if (settingsFailed || characterFailed) {
-          console.error('[settingsStore] loadFromCloud failed:', settingsErr?.message || characterErr?.message);
+        if (settingsFailed || characterFailed || memoriesErr) {
+          console.error('[settingsStore] loadFromCloud failed:', settingsErr?.message || characterErr?.message || memoriesErr?.message);
           return;
         }
 
@@ -132,6 +138,9 @@ export const useSettingsStore = create<SettingsStore>()(
             avatar: characterRow.avatar_image || get().characterProfile.avatar,
           };
         }
+        if (memoriesRows && memoriesRows.length > 0) {
+          updates.memory = memoriesRows.map((m) => ({ id: m.id, fact: m.fact }));
+        }
 
         set(updates);
       },
@@ -186,12 +195,47 @@ export const useSettingsStore = create<SettingsStore>()(
         if (error) console.error("Supabase upsert error:", error);
       },
 
-      // ─── Memory (local only for now) ──────────────────────────────────────
-      addMemory: (item) =>
-        set((state) => ({ memory: [...state.memory, item] })),
+      // ─── Memory (local + cloud sync) ──────────────────────────────────────
+      addMemory: (item) => {
+        set((state) => ({ memory: [...state.memory, item] }));
 
-      deleteMemory: (id) =>
-        set((state) => ({ memory: state.memory.filter((m) => m.id !== id) })),
+        // Fire-and-forget cloud sync
+        if (!isSupabaseEnabled()) return;
+        (async () => {
+          try {
+            const supabase = await getSupabaseClient();
+            if (!supabase) return;
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) return;
+            await supabase.from('memories').upsert(
+              { user_id: user.id, fact: item.fact },
+              { onConflict: 'user_id,fact' },
+            );
+          } catch (err) {
+            console.warn('[settingsStore] addMemory cloud sync failed:', (err as Error).message);
+          }
+        })();
+      },
+
+      deleteMemory: (id) => {
+        const item = get().memory.find((m) => m.id === id);
+        set((state) => ({ memory: state.memory.filter((m) => m.id !== id) }));
+
+        if (!item || !isSupabaseEnabled()) return;
+        (async () => {
+          try {
+            const supabase = await getSupabaseClient();
+            if (!supabase) return;
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) return;
+            await supabase.from('memories').delete()
+              .eq('user_id', user.id)
+              .eq('fact', item.fact);
+          } catch (err) {
+            console.warn('[settingsStore] deleteMemory cloud sync failed:', (err as Error).message);
+          }
+        })();
+      },
     }),
     {
       name: 'liza-app-state',

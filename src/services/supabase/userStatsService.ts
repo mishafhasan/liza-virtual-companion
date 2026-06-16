@@ -33,6 +33,12 @@ export interface DashboardStatsSnapshot {
   stats: UserStats;
   displayName: string;
   recentActivity: RecentActivity | null;
+  /**
+   * The Supabase user id the snapshot was fetched for, or `null` if we
+   * returned graceful defaults because Supabase / auth wasn't ready yet.
+   * Callers use this to decide whether the result is safe to cache.
+   */
+  userId: string | null;
 }
 
 const DEFAULT_STATS: UserStats = {
@@ -126,6 +132,11 @@ export async function getUserStats(): Promise<UserStats | null> {
 /**
  * Load all dashboard stats with one auth lookup and parallel DB reads.
  * This avoids the dashboard doing three separate `auth.getUser()` calls.
+ *
+ * Returns `userId: null` when the snapshot is a graceful fallback (Supabase
+ * disabled, client not yet ready, or no current user). Hooks must NOT cache
+ * `userId === null` results because they trigger the "all zeros / Explorer"
+ * stuck-30s state when navigation races auth hydration.
  */
 export async function getDashboardStatsSnapshot(): Promise<DashboardStatsSnapshot> {
   if (!isSupabaseEnabled()) {
@@ -133,6 +144,7 @@ export async function getDashboardStatsSnapshot(): Promise<DashboardStatsSnapsho
       stats: DEFAULT_STATS,
       displayName: 'Explorer',
       recentActivity: null,
+      userId: null,
     };
   }
 
@@ -142,6 +154,7 @@ export async function getDashboardStatsSnapshot(): Promise<DashboardStatsSnapsho
       stats: DEFAULT_STATS,
       displayName: 'Explorer',
       recentActivity: null,
+      userId: null,
     };
   }
 
@@ -151,6 +164,7 @@ export async function getDashboardStatsSnapshot(): Promise<DashboardStatsSnapsho
       stats: DEFAULT_STATS,
       displayName: 'Explorer',
       recentActivity: null,
+      userId: null,
     };
   }
 
@@ -194,6 +208,7 @@ export async function getDashboardStatsSnapshot(): Promise<DashboardStatsSnapsho
     stats: (statsResult.data as UserStats | null) ?? DEFAULT_STATS,
     displayName: profileResult.data?.display_name || fallbackName,
     recentActivity: (activityResult.data as RecentActivity | null) ?? null,
+    userId: user.id,
   };
 }
 
