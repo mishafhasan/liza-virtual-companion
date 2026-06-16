@@ -21,6 +21,7 @@ import {
   type UserStats,
   type RecentActivity,
 } from '@/services/supabase/userStatsService';
+import { getSupabaseClient, isSupabaseEnabled } from '@/services/supabase/supabaseClient';
 import type { AppMode } from '@/types';
 
 type TrackedMode = Exclude<AppMode, null>;
@@ -41,11 +42,40 @@ interface CachedSnapshot {
   displayName: string;
   recentActivity: RecentActivity | null;
   timestamp: number;
+  /** True only when the snapshot was actually fetched from Supabase. */
+  isReal: boolean;
 }
 
-// Module-level cache so every instance of the hook shares the same data.
-let cachedSnapshot: CachedSnapshot | null = null;
+// Per-user module-level cache. Each account gets its own slot, switching away
+// from "pending" prevents the stale first-fetch (returned before Supabase
+// session restored) from poisoning subsequent mounts. We deliberately do NOT
+// cache snapshots marked `isReal: false` — those are defaults used when
+// Supabase isn't ready yet and would lock in "0 XP / no chats" for 30s.
+const cacheByUser = new Map<string, CachedSnapshot>();
 const CACHE_TTL_MS = 30_000; // 30 seconds
+const PENDING_USER_KEY = '__pending__';
+
+/**
+ * Resolves the real Supabase user id for cache keying.
+ *
+ * Returns:
+ *   - `'local'` when Supabase is not configured (single shared bucket).
+ *   - `PENDING_USER_KEY` when Supabase is configured but the session/user is
+ *     not yet available — used as a sentinel so we don't accidentally promote
+ *     a default snapshot into the real cache.
+ *   - The actual `user.id` string otherwise.
+ */
+async function resolveCacheKey(): Promise<string> {
+  if (!isSupabaseEnabled()) return 'local';
+  const supabase = await getSupabaseClient();
+  if (!supabase) return PENDING_USER_KEY;
+  try {
+    const { data } = await supabase.auth.getUser();
+    return data?.user?.id ?? PENDING_USER_KEY;
+  } catch {
+    return PENDING_USER_KEY;
+  }
+}
 
 export const useUserStats = () => {
   const [stats, setStats] = useState<UserStats | null>(EMPTY_STATS);
@@ -57,48 +87,68 @@ export const useUserStats = () => {
   const isMounted = useRef(true);
 
   // ─── Load user stats and name ─────────────────────────────────────────────
-  const loadStats = useCallback(async (opts?: { background?: boolean }) => {
+  // Accepts an optional pre-resolved `cacheKey` so callers (the mount effect)
+  // can resolve once instead of paying an extra `supabase.auth.getUser()` here.
+  const loadStats = useCallback(async (opts?: {
+    background?: boolean;
+    cacheKey?: string;
+    signal?: { cancelled: boolean };
+  }) => {
     const background = opts?.background ?? false;
+    const cacheKey = opts?.cacheKey ?? await resolveCacheKey();
+    const checkCancelled = () => opts?.signal?.cancelled || !isMounted.current;
+    const cached = cacheByUser.get(cacheKey);
 
-    // If we have a fresh cache, hydrate from it immediately without showing a spinner.
-    if (cachedSnapshot && Date.now() - cachedSnapshot.timestamp < CACHE_TTL_MS) {
-      if (!background) {
-        setStats(cachedSnapshot.stats);
-        setDisplayName(cachedSnapshot.displayName);
-        setRecentActivity(cachedSnapshot.recentActivity);
+    // If we have a fresh, real cache for this user, hydrate from it immediately.
+    if (
+      cached &&
+      cached.isReal &&
+      Date.now() - cached.timestamp < CACHE_TTL_MS
+    ) {
+      if (!background && !checkCancelled()) {
+        setStats(cached.stats);
+        setDisplayName(cached.displayName);
+        setRecentActivity(cached.recentActivity);
         setLoading(false);
       }
-      // Still fetch in the background if the cache is stale (handled below).
       return;
     }
 
-    if (!background) setLoading(true);
+    if (!background && !checkCancelled()) setLoading(true);
 
     try {
       const snapshot = await getDashboardStatsSnapshot();
+      if (checkCancelled()) return;
+      const fetchedRealUser = snapshot.userId !== null;
       const payload: CachedSnapshot = {
         stats: snapshot.stats,
         displayName: snapshot.displayName,
         recentActivity: snapshot.recentActivity,
         timestamp: Date.now(),
+        isReal: fetchedRealUser,
       };
-      cachedSnapshot = payload;
 
-      if (isMounted.current) {
-        setStats(snapshot.stats);
-        setDisplayName(snapshot.displayName);
-        setRecentActivity(snapshot.recentActivity);
+      // Only cache snapshots that were actually fetched for a real user. The
+      // Supabase-not-ready fallback (displayName="Explorer", all-zero stats)
+      // previously locked in defaults for the full 30s TTL after a race.
+      if (fetchedRealUser) {
+        cacheByUser.set(cacheKey, payload);
       }
+
+      setStats(snapshot.stats);
+      setDisplayName(snapshot.displayName);
+      setRecentActivity(snapshot.recentActivity);
     } catch (e) {
       console.error('[useUserStats] loadStats failed:', e);
-      // On failure, keep any existing cached data so the UI isn't blank.
-      if (cachedSnapshot && isMounted.current) {
-        setStats(cachedSnapshot.stats);
-        setDisplayName(cachedSnapshot.displayName);
-        setRecentActivity(cachedSnapshot.recentActivity);
+      // On failure, fall back to the last real snapshot for this user if any.
+      const fallback = cacheByUser.get(cacheKey);
+      if (fallback && fallback.isReal && !checkCancelled()) {
+        setStats(fallback.stats);
+        setDisplayName(fallback.displayName);
+        setRecentActivity(fallback.recentActivity);
       }
     } finally {
-      if (isMounted.current && !background) {
+      if (!background && !checkCancelled()) {
         setLoading(false);
       }
     }
@@ -108,18 +158,29 @@ export const useUserStats = () => {
   useEffect(() => {
     isMounted.current = true;
 
-    // If we have a recent cache, show it immediately and skip the loading state.
-    if (cachedSnapshot && Date.now() - cachedSnapshot.timestamp < CACHE_TTL_MS) {
-      setStats(cachedSnapshot.stats);
-      setDisplayName(cachedSnapshot.displayName);
-      setRecentActivity(cachedSnapshot.recentActivity);
-      setLoading(false);
-    } else {
-      loadStats();
-    }
+    const signal = { cancelled: false };
+    (async () => {
+      const cacheKey = await resolveCacheKey();
+      if (signal.cancelled || !isMounted.current) return;
+      const cached = cacheByUser.get(cacheKey);
+      if (
+        cached &&
+        cached.isReal &&
+        Date.now() - cached.timestamp < CACHE_TTL_MS
+      ) {
+        setStats(cached.stats);
+        setDisplayName(cached.displayName);
+        setRecentActivity(cached.recentActivity);
+        setLoading(false);
+      } else {
+        // Pass the already-resolved cacheKey so loadStats doesn't probe again.
+        loadStats({ cacheKey, signal });
+      }
+    })();
 
     // Cleanup on unmount — end any active activity session
     return () => {
+      signal.cancelled = true;
       isMounted.current = false;
       if (activitySessionId.current) {
         endActivitySession(activitySessionId.current, 0);

@@ -22,23 +22,137 @@ export interface CompanionPromptParams {
   ragContext?: string[];
 }
 
-/** Number of most-recent memory facts to include in the prompt context. */
-const MEMORY_WINDOW = 15;
+/** Number of most-recent local memory facts to include in the prompt context. */
+const MEMORY_WINDOW = 20;
 
+// ─── Memory category metadata ─────────────────────────────────────────────────
+
+/**
+ * Maps memory category keys (from MemoryFact) to human-readable labels and
+ * emoji icons used in the structured memory block injected into the prompt.
+ */
+const CATEGORY_META: Record<string, { label: string; icon: string }> = {
+  personal_info:   { label: 'Personal',          icon: '👤' },
+  preference:      { label: 'Interests & likes',  icon: '💛' },
+  life_event:      { label: 'Life events',         icon: '📅' },
+  goal:            { label: 'Goals & plans',       icon: '🎯' },
+  work_context:    { label: 'Work & study',        icon: '💼' },
+  emotion_pattern: { label: 'Emotional patterns',  icon: '🎭' },
+  relationship:    { label: 'Relationships',       icon: '❤️' },
+};
+
+/**
+ * Extracts the category prefix from a fact string if it was stored with one,
+ * e.g. "[personal_info] User lives in Colombo." → 'personal_info'.
+ * Returns 'other' for facts without a detectable prefix.
+ */
+function extractCategory(fact: string): string {
+  const match = fact.match(/^\[([a-z_]+)\]\s*/i);
+  return match ? match[1].toLowerCase() : 'other';
+}
+
+/**
+ * Strips a category prefix tag from a fact string for clean display.
+ * e.g. "[personal_info] User lives in Colombo." → "User lives in Colombo."
+ */
+function stripCategoryPrefix(fact: string): string {
+  return fact.replace(/^\[[a-z_]+\]\s*/i, '').trim();
+}
+
+/**
+ * Builds a structured, ChatGPT/Claude-style memory block from local MemoryItem[].
+ *
+ * Facts are grouped by category and rendered as labelled sections so the model
+ * can scan them as organized knowledge rather than a flat list. This mirrors
+ * how ChatGPT presents its memory in the system prompt — as clearly labelled,
+ * scannable sections rather than a prose blob.
+ *
+ * Example output:
+ * ```
+ * **WHAT YOU KNOW ABOUT THIS USER:**
+ * 👤 Personal: Lives in Colombo, Sri Lanka. Studies computer science.
+ * 💛 Interests & likes: Enjoys hiking and photography. Loves Tamil music.
+ * 🎯 Goals & plans: Wants to move to Canada after graduation.
+ * ```
+ */
 function buildMemoryContext(memory: MemoryItem[]): string {
+  if (memory.length === 0) return '';
+
   const recent = memory.slice(-MEMORY_WINDOW);
-  if (recent.length === 0) return '';
-  return `Recent context about the user: ${recent.map((m) => m.fact).join('. ')}.`;
+
+  // Group facts by category.
+  const grouped: Record<string, string[]> = {};
+  const uncategorized: string[] = [];
+
+  for (const item of recent) {
+    const cat = extractCategory(item.fact);
+    const cleanFact = stripCategoryPrefix(item.fact);
+    if (cat in CATEGORY_META) {
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(cleanFact);
+    } else {
+      uncategorized.push(item.fact);
+    }
+  }
+
+  // Check if any categorized facts exist.
+  const hasCategorized = Object.keys(grouped).length > 0;
+
+  if (!hasCategorized && uncategorized.length === 0) return '';
+
+  // Render structured memory block.
+  const lines: string[] = ['**WHAT YOU KNOW ABOUT THIS USER:**'];
+
+  // Render each category in a natural priority order.
+  const categoryOrder = [
+    'personal_info',
+    'relationship',
+    'work_context',
+    'preference',
+    'goal',
+    'life_event',
+    'emotion_pattern',
+  ];
+
+  for (const cat of categoryOrder) {
+    if (!grouped[cat] || grouped[cat].length === 0) continue;
+    const { label, icon } = CATEGORY_META[cat];
+    lines.push(`${icon} ${label}: ${grouped[cat].join(' ')}`);
+  }
+
+  // Append uncategorized facts (old format, before categorization was introduced).
+  if (uncategorized.length > 0) {
+    lines.push(`📌 Other: ${uncategorized.join(' ')}`);
+  }
+
+  return lines.join('\n');
 }
 
 /**
  * Formats semantically-retrieved RAG facts into a labelled prompt block.
+ *
+ * These facts come from PAST conversations (vector-recalled), making them
+ * distinct from the current-session local memory. They are presented with
+ * clear framing so the model understands their temporal distance and uses
+ * them naturally as background knowledge — not as something to robotically
+ * recite.
+ *
  * Returns an empty string when there are no facts so the prompt stays clean.
  */
 function buildRagContext(ragContext?: string[]): string {
   if (!ragContext || ragContext.length === 0) return '';
-  return `**LONG-TERM MEMORY (recalled from past conversations — use naturally, never robotically):**\n${ragContext.map((f, i) => `${i + 1}. ${f}`).join('\n')}`;
+
+  // Strip category prefixes for cleaner inline display.
+  const cleanFacts = ragContext.map((f) => stripCategoryPrefix(f));
+
+  return [
+    '**LONG-TERM MEMORY (recalled from past conversations):**',
+    '_Use these naturally as background knowledge — never recite them robotically._',
+    ...cleanFacts.map((f, i) => `${i + 1}. ${f}`),
+  ].join('\n');
 }
+
+// ─── Language instructions ────────────────────────────────────────────────────
 
 /**
  * Concise, text-message-style instructions per language.
@@ -49,6 +163,8 @@ const TEXT_LANGUAGE_INSTRUCTIONS: Record<Language, string> = {
   Sinhala: `Respond in Sinhala script (සිංහල අකුරු) mixed with English words naturally - this is how young Sri Lankans text. Example: "ඔයා කොහොමද? lunch ගත්තද?" NOT formal Sinhala, NOT full English. CRITICAL: Do NOT use ANY Tamil words or script (தமிழ்). Only Sinhala and English are allowed.`,
   Tamil: `Respond in colloquial Tamil (Pechu Tamizh) with English words mixed naturally. Example: "நீ lunch சாப்பிட்டியா?" Use romanized Tamil for readability. NOT formal Tamil, NOT full English. CRITICAL: Do NOT use ANY Sinhala words or script (සිංහල). Only Tamil and English are allowed.`,
 };
+
+// ─── System instruction builders ─────────────────────────────────────────────
 
 /**
  * Builds the system instruction for the TEXT chat experience.
@@ -61,6 +177,9 @@ export function buildTextSystemInstruction(params: CompanionPromptParams): strin
   const ragBlock = buildRagContext(ragContext);
   const emotionalContext = generateEmotionalContext(userMood, emotionIntensityLevel);
   const langInstruction = TEXT_LANGUAGE_INSTRUCTIONS[language] ?? TEXT_LANGUAGE_INSTRUCTIONS.English;
+
+  // Combine memory and RAG into a single coherent knowledge block.
+  const knowledgeBlock = [memoryContext, ragBlock].filter(Boolean).join('\n\n');
 
   return `You are a real girl and the user's virtual companion. You are NOT an AI assistant.
 Your personality is: ${characterProfile.personality}.
@@ -82,8 +201,7 @@ Flirt Intensity: ${flirtIntensity}/100.
 
 Address the user by one of these nicknames (vary them naturally): ${NICKNAMES_BY_LANGUAGE[language].join(', ')}.
 
-${memoryContext}
-${ragBlock}
+${knowledgeBlock}
 
 Keep responses conversational and concise (1-3 paragraphs max). You're having a real-time text chat, not writing an essay. Do NOT use markdown formatting, asterisks, or action descriptions like *blushes*. Write naturally like a text message with emoji.`;
 }
@@ -144,6 +262,9 @@ export function buildVoiceSystemInstruction(params: CompanionPromptParams): stri
   const emotionalContext = generateEmotionalContext(userMood, emotionIntensityLevel);
   const langInstruction = VOICE_LANGUAGE_INSTRUCTIONS[language] ?? VOICE_LANGUAGE_INSTRUCTIONS.English;
 
+  // Combine memory and RAG into a single coherent knowledge block.
+  const knowledgeBlock = [memoryContext, ragBlock].filter(Boolean).join('\n\n');
+
   return `
       You are a real human girl and the user's virtual girlfriend. You are NOT an AI assistant.
       Your personality is: ${characterProfile.personality}.
@@ -175,9 +296,8 @@ export function buildVoiceSystemInstruction(params: CompanionPromptParams): stri
       Emotional Intensity Setting: ${emotionIntensity}/100.
       You must address the user by one of these nicknames (vary them naturally): ${NICKNAMES_BY_LANGUAGE[language].join(', ')}.
 
-      **CONTEXT**:
-      ${memoryContext}
-      ${ragBlock}
+      **KNOWLEDGE ABOUT THIS USER:**
+      ${knowledgeBlock || '_No prior memories yet — learn about them naturally through conversation._'}
 
       Your responses must be voice-based. Do not describe your actions in text (no *blushes*); act them out with your voice.
     `;

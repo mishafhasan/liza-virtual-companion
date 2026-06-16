@@ -10,10 +10,12 @@ import {
     retrieveRelevantMemories,
     summarizeMessageBatch,
     deleteSession,
+    type MemoryTurn,
 } from '@/services/supabase/conversationService';
 import { addXP, updateRecentActivity, XP_REWARDS } from '@/services/supabase/userStatsService';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useAuthStore } from '@/stores/authStore';
+import { getSupabaseClient, isSupabaseEnabled } from '@/services/supabase/supabaseClient';
 import { toast } from 'sonner';
 import type { Conversation, Message, AIPersonality, MessageRole } from '@/types';
 
@@ -24,8 +26,16 @@ interface UseChatSessionOptions {
 // ─── Module-level cache for sessions and turns ──────────────────────────────
 // Shared across all hook instances so navigating between pages re-uses data.
 // Each entry is keyed by user ID so switching accounts never leaks data.
+//
+// Keying policy:
+//   - `'local'` when Supabase is not configured.
+//   - `PENDING_USER_KEY` when Supabase is configured but the user/session is
+//     not yet available. Caches under this key are NEVER persisted (see
+//     `setSessionsCache`) so a stale first fetch doesn't lock in "no chats".
+//   - The real Supabase `user.id` otherwise.
 
 const CACHE_TTL_MS = 30_000;
+const PENDING_USER_KEY = '__pending__';
 
 interface SessionsCache {
     sessions: Conversation[];
@@ -42,12 +52,34 @@ interface TurnsCache {
 const cachedSessionsByUser = new Map<string, SessionsCache>();
 const cachedTurnsByUser = new Map<string, Map<string, TurnsCache>>();
 
-function getCurrentUserId(): string {
-    return useAuthStore.getState().user?.id ?? 'anonymous';
+/**
+ * Resolves the current cache key from the real Supabase session, falling
+ * back to the Auth Zustand store when Supabase isn't usable. Reads auth
+ * synchronously when it can; only awaits Supabase when no other option.
+ */
+function getCurrentUserIdSync(): string {
+    const authUser = useAuthStore.getState().user?.id;
+    if (authUser) return authUser;
+    if (!isSupabaseEnabled()) return 'local';
+    return PENDING_USER_KEY;
 }
 
-function getSessionsCache(): SessionsCache | null {
-    const userId = getCurrentUserId();
+async function resolveCacheKey(): Promise<string> {
+    const sync = getCurrentUserIdSync();
+    if (sync !== PENDING_USER_KEY) return sync;
+    // Supabase is configured but the Zustand user is empty. Probe the SDK
+    // to grab the real user id; bail to PENDING if it's still unavailable.
+    const supabase = await getSupabaseClient();
+    if (!supabase) return PENDING_USER_KEY;
+    try {
+        const { data } = await supabase.auth.getUser();
+        return data?.user?.id ?? PENDING_USER_KEY;
+    } catch {
+        return PENDING_USER_KEY;
+    }
+}
+
+function getSessionsCache(userId: string): SessionsCache | null {
     const cache = cachedSessionsByUser.get(userId);
     if (!cache) return null;
     if (Date.now() - cache.timestamp > CACHE_TTL_MS) {
@@ -57,13 +89,17 @@ function getSessionsCache(): SessionsCache | null {
     return cache;
 }
 
-function setSessionsCache(sessions: Conversation[]) {
-    const userId = getCurrentUserId();
+/**
+ * Only persist a sessions cache under a stable, real key. A first fetch that
+ * raced past auth hydration must NOT poison subsequent mounts with an empty
+ * list — those are debounced by `getSessionsCache`'s TTL otherwise.
+ */
+function setSessionsCache(userId: string, sessions: Conversation[]) {
+    if (userId === PENDING_USER_KEY) return;
     cachedSessionsByUser.set(userId, { sessions, timestamp: Date.now(), userId });
 }
 
-function getTurnsCache(sessionId: string): TurnsCache | null {
-    const userId = getCurrentUserId();
+function getTurnsCache(userId: string, sessionId: string): TurnsCache | null {
     const userCache = cachedTurnsByUser.get(userId);
     if (!userCache) return null;
     const cache = userCache.get(sessionId);
@@ -75,8 +111,8 @@ function getTurnsCache(sessionId: string): TurnsCache | null {
     return cache;
 }
 
-function setTurnsCache(sessionId: string, messages: Message[]) {
-    const userId = getCurrentUserId();
+function setTurnsCache(userId: string, sessionId: string, messages: Message[]) {
+    if (userId === PENDING_USER_KEY) return;
     let userCache = cachedTurnsByUser.get(userId);
     if (!userCache) {
         userCache = new Map();
@@ -85,12 +121,17 @@ function setTurnsCache(sessionId: string, messages: Message[]) {
     userCache.set(sessionId, { messages, timestamp: Date.now(), userId });
 }
 
-function invalidateSessionsCache() {
-    cachedSessionsByUser.delete(getCurrentUserId());
+function invalidateSessionsCache(userId: string) {
+    if (userId === PENDING_USER_KEY) {
+        // Drop any pending cache inherited from a race.
+        cachedSessionsByUser.delete(PENDING_USER_KEY);
+        return;
+    }
+    cachedSessionsByUser.delete(userId);
 }
 
-function invalidateTurnsCache(sessionId: string) {
-    const userId = getCurrentUserId();
+function invalidateTurnsCache(userId: string, sessionId: string) {
+    if (userId === PENDING_USER_KEY) return;
     const userCache = cachedTurnsByUser.get(userId);
     if (userCache) userCache.delete(sessionId);
 }
@@ -105,12 +146,24 @@ function invalidateTurnsCache(sessionId: string) {
  * to /chat from /settings or /dashboard shows history instantly.
  */
 export const useChatSession = (options?: UseChatSessionOptions) => {
-    const [conversations, setConversations] = useState<Conversation[]>(getSessionsCache()?.sessions ?? []);
+    // Initial state is read from the cache using a sync-stable key. On first
+    // mount the Zustand auth store may not yet have a user id; the sync resolver
+    // returns 'local' for local-only mode and '__pending__' otherwise. Either
+    // way we hydrate from whatever the cache currently holds (PENDING slots
+    // are never written, so they'll be empty here — the effect above retries).
+    const [conversations, setConversations] = useState<Conversation[]>(
+        getSessionsCache(getCurrentUserIdSync())?.sessions ?? []
+    );
     const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null);
     const [chatLoading, setChatLoading] = useState(false);
     const [input, setInput] = useState('');
     const [personality, setPersonality] = useState<AIPersonality>('friendly');
-    const [sidebarOpen, setSidebarOpen] = useState(true);
+    const [sidebarOpen, setSidebarOpen] = useState(() => {
+        if (typeof window !== 'undefined') {
+            return window.innerWidth >= 768;
+        }
+        return true;
+    });
 
     // Tracks the active Supabase session UUID for the current conversation.
     const dbSessionId = useRef<string | null>(null);
@@ -120,10 +173,12 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
 
     // ─── Mid-conversation memory summarization ───────────────────────────
     //
-    // Counts user messages in the current session. Every 5 messages the
-    // messages sent since the last summarization are passed to Gemini and
-    // the resulting memory fact is saved both locally (settingsStore.memory)
+    // Counts user messages in the current session. Every 6 messages the turns
+    // since the last summarization are passed to Gemini and the resulting
+    // memory facts (2–7 per batch) are saved both locally (settingsStore.memory)
     // and to the Supabase RAG pipeline (when configured).
+    // Using full conversation turns (user + assistant) gives richer context
+    // than user-only messages, matching the ChatGPT/Claude memory approach.
     const userMessageCountRef = useRef(0);
     const lastSummarizedIndexRef = useRef(0);
     /** Guard to prevent overlapping summarizations when messages are sent rapidly. */
@@ -138,10 +193,15 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
     //
     // Uses a 30-second module-level cache so navigating back to /chat from
     // another page shows the sidebar instantly without refetching.
+    //
+    // Resolves the cache key from the real Supabase session first; only falls
+    // back to a `__pending__` sentinel if Supabase isn't usable yet, in which
+    // case neither the session nor turn cache is written — this prevents the
+    // first race-mounted nav from freezing an empty sidebar for 30s.
     const loadHistory = useCallback(async (selectId?: string) => {
-        // Use cached sessions if they are fresh.
         let convs: Conversation[];
-        const sessionsCache = getSessionsCache();
+        const userId = await resolveCacheKey();
+        const sessionsCache = getSessionsCache(userId);
 
         if (sessionsCache) {
             convs = sessionsCache.sessions;
@@ -152,7 +212,8 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
                     setConversations([]);
                     setCurrentConversation(null);
                 }
-                invalidateSessionsCache();
+                // Don't cache an empty result so the next mount retries cleanly.
+                invalidateSessionsCache(userId);
                 return;
             }
             convs = sessions.map((s) => ({
@@ -163,7 +224,7 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
                 updatedAt: new Date(s.ended_at ?? s.started_at),
                 mode: 'entertainment',
             }));
-            setSessionsCache(convs);
+            setSessionsCache(userId, convs);
         }
 
         if (!isMountedRef.current) return;
@@ -177,7 +238,7 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         dbSessionId.current = target.id;
 
         // Load turns — use cached turns if fresh, otherwise hit the DB.
-        const turnsCache = getTurnsCache(target.id);
+        const turnsCache = getTurnsCache(userId, target.id);
 
         if (turnsCache) {
             if (isMountedRef.current) {
@@ -195,7 +256,7 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
                 content: t.content,
                 timestamp: new Date(t.created_at),
             }));
-            setTurnsCache(target.id, messages);
+            setTurnsCache(userId, target.id, messages);
             setCurrentConversation({ ...target, messages });
         } else {
             setCurrentConversation(target);
@@ -237,7 +298,8 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         if (!sidebarOpen) setSidebarOpen(true);
 
         // Invalidate the sessions cache so the next loadHistory sees the new chat.
-        invalidateSessionsCache();
+        // Resolve async so we hit the real user slot, not the pending sentinel.
+        invalidateSessionsCache(await resolveCacheKey());
 
         try {
             // Close any existing session in the background
@@ -298,7 +360,7 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
             await updateRecentActivity('entertainment', sid);
         }
         // New conversation must not be hidden by stale cache.
-        invalidateSessionsCache();
+        invalidateSessionsCache(await resolveCacheKey());
         conversation = newConv;
         setConversations(prev => [newConv, ...prev]);
         setCurrentConversation(newConv);
@@ -317,9 +379,12 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         setConversations(prev => prev.map(c => c.id === updatedConv.id ? updatedConv : c));
 
         // Keep the sessions cache updated so sidebar ordering stays fresh.
-        const sessionsCache = getSessionsCache();
+        // Resolve once per send so both reads and writes hit the same key.
+        const cacheKey = await resolveCacheKey();
+        const sessionsCache = getSessionsCache(cacheKey);
         if (sessionsCache) {
             setSessionsCache(
+                cacheKey,
                 sessionsCache.sessions.map(c =>
                     c.id === updatedConv.id ? { ...c, updatedAt: updatedConv.updatedAt } : c,
                 ),
@@ -338,9 +403,11 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
                 prev.map(c => c.id === updatedConv.id ? { ...c, title } : c),
             );
             // Keep the sessions cache in sync so the sidebar title is fresh.
-            const sessionsCache = getSessionsCache();
+            const titleCacheKey = await resolveCacheKey();
+            const sessionsCache = getSessionsCache(titleCacheKey);
             if (sessionsCache) {
                 setSessionsCache(
+                    titleCacheKey,
                     sessionsCache.sessions.map(c =>
                         c.id === updatedConv.id ? { ...c, title } : c,
                     ),
@@ -386,7 +453,7 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
 
             // Keep the turns cache in sync so navigation back shows the latest messages.
             if (dbSessionId.current) {
-                setTurnsCache(dbSessionId.current, finalMessages);
+                setTurnsCache(await resolveCacheKey(), dbSessionId.current, finalMessages);
             }
 
             // Persist both turns together.
@@ -398,10 +465,10 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
                 await updateRecentActivity('entertainment', dbSessionId.current);
             }
 
-            // ── Mid-conversation memory summarization (every 5 messages) ──
+            // ── Mid-conversation memory summarization (every 6 messages) ──
             userMessageCountRef.current += 1;
             if (
-                userMessageCountRef.current % 5 === 0 &&
+                userMessageCountRef.current % 6 === 0 &&
                 !isSummarizingRef.current
             ) {
                 isSummarizingRef.current = true;
@@ -452,12 +519,15 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         lastSummarizedIndexRef.current = 0;
         isSummarizingRef.current = false;
 
+        // Resolve the real user id so cache writes target the right slot.
+        const userId = await resolveCacheKey();
+
         // Try to find from local state first
         let conv = conversations.find(c => c.id === id);
 
         // If not found in local state, try to load from DB directly (e.g., Resume from dashboard)
         if (!conv) {
-            const turnsCache = getTurnsCache(id);
+            const turnsCache = getTurnsCache(userId, id);
             const messages: Message[] = turnsCache
                 ? turnsCache.messages
                 : (await loadTurns(id)).map(t => ({
@@ -468,7 +538,7 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
                 }));
 
             if (!turnsCache && messages.length > 0) {
-                setTurnsCache(id, messages);
+                setTurnsCache(userId, id, messages);
             }
 
             const fetchedConv: Conversation = {
@@ -491,7 +561,7 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
 
         // If messages haven't been loaded yet, use cache or fetch from DB.
         if (conv.messages.length === 0) {
-            const turnsCache = getTurnsCache(id);
+            const turnsCache = getTurnsCache(userId, id);
 
             if (turnsCache) {
                 const loaded = { ...conv, messages: turnsCache.messages };
@@ -510,7 +580,7 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
                     content: t.content,
                     timestamp: new Date(t.created_at),
                 }));
-                setTurnsCache(id, messages);
+                setTurnsCache(userId, id, messages);
                 const loaded = { ...conv, messages };
                 setConversations(prev => prev.map(c => c.id === id ? loaded : c));
                 setCurrentConversation(loaded);
@@ -544,8 +614,10 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
         }
 
         // Invalidate caches so the next loadHistory doesn't show the deleted chat.
-        invalidateSessionsCache();
-        invalidateTurnsCache(id);
+        // Resolved async to target the right user's slot.
+        const cacheKey = await resolveCacheKey();
+        invalidateSessionsCache(cacheKey);
+        invalidateTurnsCache(cacheKey, id);
 
         try {
             await deleteSession(id);
@@ -580,55 +652,76 @@ export const useChatSession = (options?: UseChatSessionOptions) => {
     };
 };
 
-// ─── Helper: summarize unprocessed user messages into a memory fact ────────────
+// ─── Helper: extract multi-fact memory from unsummarized conversation ──────────
 
 /**
- * Takes the last `startIndex` unsummarized user messages from the conversation,
- * sends them to Gemini for summarization, saves the result as a local memory
- * fact, and also stores it in the RAG pipeline when Supabase is available.
+ * ChatGPT/Claude-style memory extraction for mid-conversation summarization.
  *
- * @returns The new "lastSummarizedIndex" (total user message count) on success,
- *          or `null` if summarization was skipped (e.g. no new messages).
+ * Collects the full conversation turns (both user and assistant) that haven't
+ * been summarized yet, sends them to Gemini for structured multi-fact extraction,
+ * saves each fact locally (settingsStore.memory) with its category prefix for
+ * structured rendering, and stores each in the Supabase RAG pipeline when
+ * configured.
+ *
+ * Key improvements over the old single-fact approach:
+ * - Processes FULL conversation (user + assistant) for richer context
+ * - Extracts 2–7 distinct categorized facts per batch (not just 1)
+ * - Persists each fact as a separate embedding for fine-grained recall
+ * - Category prefix stored with each fact enables structured memory display
+ *
+ * @param messages   Full conversation message list (user + assistant turns).
+ * @param startIndex The message index from which to start (unsummarized portion).
+ * @returns          The new lastSummarizedIndex on success, or `null` if skipped.
  */
 async function summarizeRecentContext(
     messages: Message[],
     startIndex: number,
 ): Promise<number | null> {
-    // Collect user messages that haven't been summarized yet.
-    const userMessages = messages
-        .filter((m) => m.role === 'user')
-        .slice(startIndex);
+    // Slice the unsummarized portion of the conversation (both sides).
+    // We use message index (not just user-message index) for a clean window.
+    const unsummarizedMessages = messages.slice(startIndex);
 
-    if (userMessages.length === 0) return null;
+    // Need at least a few turns to extract meaningful facts.
+    if (unsummarizedMessages.length < 2) return null;
 
-    const texts = userMessages.map((m) => m.content);
+    // Convert to MemoryTurn format expected by the new summarizeMessageBatch.
+    const turns: MemoryTurn[] = unsummarizedMessages.map((m) => ({
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.content,
+    }));
 
     // Summarize via Gemini — returns null if AI is unavailable.
-    const result = await summarizeMessageBatch(texts);
-    if (!result) return null;
+    const result = await summarizeMessageBatch(turns);
+    if (!result || !result.facts.length) return null;
 
-    // Save to local Zustand memory (works in all modes).
+    // Save each extracted fact to local Zustand memory with its category prefix
+    // so buildMemoryContext can render them in structured sections.
     const addMemory = useSettingsStore.getState().addMemory;
-    addMemory({ id: 'mem-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6), fact: result.summary });
-
-    // Notify the user based on the actual Supabase persistence result.
-    if (result.persisted) {
-      toast.success('Memory saved', {
-        description: "This conversation's key facts are now stored for future context.",
-      });
-    } else if (result.supabaseConfigured) {
-      toast.error('Memory not stored in Supabase', {
-        description: 'The memory was summarized locally, but the Supabase insert failed. Check the console for embedding or RLS errors.',
-      });
-    } else {
-      toast.success('Memory saved locally', {
-        description: 'Supabase is not configured, so this memory is only stored in this browser.',
-      });
+    for (const factItem of result.facts) {
+        const taggedFact = `[${factItem.category}] ${factItem.fact}`;
+        addMemory({
+            id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            fact: taggedFact,
+        });
     }
 
-    // Return the new index (total user messages processed so far) so the
-    // caller can advance lastSummarizedIndexRef. Count all user messages
-    // (not just the slice) for a clean running index.
-    const allUserMessages = messages.filter((m) => m.role === 'user');
-    return allUserMessages.length;
+    // Notify the user based on the actual Supabase persistence result.
+    const count = result.facts.length;
+    if (result.persisted) {
+        toast.success(`${count} memory fact${count > 1 ? 's' : ''} saved`, {
+            description: "Key details from this conversation are stored for future context.",
+        });
+    } else if (result.supabaseConfigured) {
+        toast.error('Memory not stored in Supabase', {
+            description: 'Facts were extracted locally, but the Supabase insert failed. Check the console for embedding or RLS errors.',
+        });
+    } else {
+        toast.success(`${count} memory fact${count > 1 ? 's' : ''} saved locally`, {
+            description: 'Supabase is not configured, so memories are only stored in this browser.',
+        });
+    }
+
+    // Return the new message index boundary so the caller advances
+    // lastSummarizedIndexRef to avoid re-processing the same messages.
+    return messages.length;
 }
