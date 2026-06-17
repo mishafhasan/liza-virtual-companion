@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { toast } from 'sonner';
 import { X, Save, Plus, Trash2, User, Video, Key, Brain, Globe, Mic, Heart, Sparkles, ImagePlus, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,7 +10,7 @@ import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { canGenerateAvatar, generateAvatar } from '@/services/ai/avatarService';
+import { generateAvatar } from '@/services/ai/avatarService';
 import { useSettingsStore } from '@/stores/settingsStore';
 import type { Settings, CharacterProfile, MemoryItem, Language } from '@/types';
 
@@ -69,13 +70,18 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     const [avatarPrompt, setAvatarPrompt] = useState('');
     const [isGenerating, setIsGenerating] = useState(false);
     const [generationError, setGenerationError] = useState('');
-    const avatarGenerationEnabled = canGenerateAvatar();
 
     if (!isOpen) return null;
 
     const handleAddMemory = () => {
         if (!newMemory.trim()) return;
-        addMemory({ id: Date.now().toString(), fact: newMemory.trim() });
+        const trimmed = newMemory.trim();
+        const alreadyExists = memory.some((m) => m.fact.toLowerCase() === trimmed.toLowerCase());
+        if (alreadyExists) {
+            toast.error('That fact is already in your memory.');
+            return;
+        }
+        addMemory({ id: Date.now().toString(), fact: trimmed });
         setNewMemory('');
     };
 
@@ -178,7 +184,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                                         />
                                         <Button
                                             onClick={handleGenerateAvatar}
-                                            disabled={isGenerating || !avatarPrompt.trim() || !avatarGenerationEnabled}
+                                            disabled={isGenerating || !avatarPrompt.trim()}
                                             className="w-full bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-40"
                                         >
                                             {isGenerating ? (
@@ -190,9 +196,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                                         {generationError && (
                                             <p className="text-xs text-red-400">{generationError}</p>
                                         )}
-                                        {!avatarGenerationEnabled && (
-                                            <p className="text-xs text-gray-500">Avatar generation is unavailable until the app developer configures Stability AI.</p>
-                                        )}
+                                        <p className="text-xs text-gray-500">Avatar generation uses Pollinations.ai (free). Set POLLINATIONS_API_KEY for higher limits.</p>
                                     </div>
                                 </div>
                             </div>

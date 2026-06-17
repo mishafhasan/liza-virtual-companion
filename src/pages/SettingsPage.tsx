@@ -33,7 +33,13 @@ export const SettingsPage: React.FC = () => {
 
     const handleAddMemory = () => {
         if (!newMemory.trim()) return;
-        addMemory({ id: Date.now().toString(), fact: newMemory.trim() });
+        const trimmed = newMemory.trim();
+        const alreadyExists = memory.some((m) => m.fact.toLowerCase() === trimmed.toLowerCase());
+        if (alreadyExists) {
+            toast.error('That fact is already in your memory.');
+            return;
+        }
+        addMemory({ id: Date.now().toString(), fact: trimmed });
         setNewMemory('');
     };
 

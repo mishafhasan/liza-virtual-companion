@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams, useLocation } from 'react-router-dom';
 import { useAuth } from '@/stores/authStore';
 import { useSettings } from '@/stores/settingsStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { useChatSession } from '@/hooks/useChatSession';
 import { useLiveSession } from '@/hooks/useLiveSession';
 import { useHeyGenSession } from '@/hooks/useHeyGenSession';
@@ -17,6 +18,8 @@ import {
     saveTurn,
     saveTurnPair,
     updateSessionTitle,
+    summarizeMessageBatch,
+    type MemoryTurn,
 } from '@/services/supabase/conversationService';
 import type { ConversationTurn, Language } from '@/types';
 import { toast } from 'sonner';
@@ -40,6 +43,14 @@ export const ChatPage: React.FC = () => {
     const [voiceConversation, setVoiceConversation] = useState<ConversationTurn[]>([]);
     const voiceSessionIdRef = useRef<string | null>(null);
     const voiceSessionTitleRef = useRef(false);
+
+    // ── Voice-mode memory tracking ──────────────────────────────────────────
+    // Mirrors the text-mode mid-conversation summarization. Every 6 voice turns
+    // the accumulated turns are sent through the proper LLM extraction pipeline
+    // and the resulting facts are saved locally (Zustand) + to Supabase RAG.
+    const voiceTurnCountRef = useRef(0);
+    const voiceAccumulatedTurnsRef = useRef<MemoryTurn[]>([]);
+    const isVoiceSummarizingRef = useRef(false);
 
     const location = useLocation();
 
@@ -161,7 +172,7 @@ export const ChatPage: React.FC = () => {
             };
             setVoiceConversation(prev => [...prev, turnWithEmotion]);
 
-            // Persist turns to the DB session and generate RAG memories
+            // Persist turns to the DB session
             const sid = voiceSessionIdRef.current;
             if (sid) {
                 if (turn.user && turn.liza) {
@@ -184,9 +195,58 @@ export const ChatPage: React.FC = () => {
                 heygenSpeak(turn.liza);
             }
 
-            // Simple memory creation: add user's turn to local state memory
-            if (turn.user && turn.user.length > 5) {
-                addMemory({ id: Date.now().toString(), fact: turn.user });
+            // ── Voice-mode mid-conversation memory summarization ──────────────
+            // Accumulate full turns (user + Liza) for batch extraction.
+            // Every 6 completed voice turns, run the LLM extraction pipeline
+            // to extract categorized facts and save them properly — matching
+            // exactly what text mode does (never saving raw messages directly).
+            if (turn.user || turn.liza) {
+                if (turn.user) {
+                    voiceAccumulatedTurnsRef.current.push({ role: 'user', content: turn.user });
+                }
+                if (turn.liza) {
+                    voiceAccumulatedTurnsRef.current.push({ role: 'assistant', content: turn.liza });
+                }
+
+                // Only count turns where the user actually spoke
+                if (turn.user && turn.user.length > 3) {
+                    voiceTurnCountRef.current += 1;
+                }
+
+                // Trigger batch summarization every 6 user voice turns
+                if (voiceTurnCountRef.current > 0 && voiceTurnCountRef.current % 6 === 0 && !isVoiceSummarizingRef.current) {
+                    isVoiceSummarizingRef.current = true;
+                    const turnsToProcess = [...voiceAccumulatedTurnsRef.current];
+                    voiceAccumulatedTurnsRef.current = []; // reset for next batch
+
+                    summarizeMessageBatch(turnsToProcess)
+                        .then((result) => {
+                            if (!result || !result.facts.length) return;
+
+                            // Save each extracted fact to local Zustand memory
+                            // with its [category] prefix for structured rendering.
+                            const addMemoryFn = useSettingsStore.getState().addMemory;
+                            for (const factItem of result.facts) {
+                                addMemoryFn({
+                                    id: `mem-voice-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                                    fact: `[${factItem.category}] ${factItem.fact}`,
+                                });
+                            }
+
+                            const count = result.facts.length;
+                            if (result.persisted) {
+                                toast.success(`${count} memory fact${count > 1 ? 's' : ''} saved`, {
+                                    description: 'Key details from this voice conversation are stored for future context.',
+                                });
+                            } else if (!result.supabaseConfigured) {
+                                toast.success(`${count} memory fact${count > 1 ? 's' : ''} saved locally`, {
+                                    description: 'Supabase is not configured, so memories are only stored in this browser.',
+                                });
+                            }
+                        })
+                        .catch((err) => console.warn('[ChatPage] voice memory summarization skipped:', err))
+                        .finally(() => { isVoiceSummarizingRef.current = false; });
+                }
             }
         }
     });
@@ -227,6 +287,11 @@ export const ChatPage: React.FC = () => {
         voiceSessionTitleRef.current = false;
         voiceSessionIdRef.current = null;
 
+        // Reset voice memory tracking for the new session
+        voiceTurnCountRef.current = 0;
+        voiceAccumulatedTurnsRef.current = [];
+        isVoiceSummarizingRef.current = false;
+
         try {
             // Create a DB session so voice turns get persisted like text conversations
             const sid = await createSession('entertainment', 'Voice Conversation');
@@ -259,7 +324,34 @@ export const ChatPage: React.FC = () => {
         setIsVoiceMode(false);
         stopVoiceSession();
 
-        // Close the DB session so it appears in the conversation sidebar
+        // Flush any remaining unsummarized voice turns through the LLM extraction
+        // pipeline so no facts are lost when the session ends before the 6-turn
+        // batch threshold is reached. Fire-and-forget — session-end Supabase
+        // persistence is handled by closeSession → summarizeAndStoreSessionMemory.
+        const remainingTurns = voiceAccumulatedTurnsRef.current;
+        if (remainingTurns.length >= 2 && !isVoiceSummarizingRef.current) {
+            voiceAccumulatedTurnsRef.current = [];
+            summarizeMessageBatch(remainingTurns)
+                .then((result) => {
+                    if (!result || !result.facts.length) return;
+                    const addMemoryFn = useSettingsStore.getState().addMemory;
+                    for (const factItem of result.facts) {
+                        addMemoryFn({
+                            id: `mem-voice-end-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                            fact: `[${factItem.category}] ${factItem.fact}`,
+                        });
+                    }
+                })
+                .catch((err) => console.warn('[ChatPage] voice end-of-session memory flush skipped:', err));
+        }
+
+        // Reset voice tracking for next session
+        voiceTurnCountRef.current = 0;
+        voiceAccumulatedTurnsRef.current = [];
+        isVoiceSummarizingRef.current = false;
+
+        // Close the DB session — this triggers summarizeAndStoreSessionMemory
+        // which handles Supabase RAG persistence for ALL turns in the session.
         const sid = voiceSessionIdRef.current;
         if (sid) {
             closeSession(sid).catch(console.error);
@@ -318,9 +410,18 @@ export const ChatPage: React.FC = () => {
         stopVoiceSession, stopHeyGenSession, startVoiceSession, startHeyGenSession, resetEmotionState]);
 
     return (
-        <div className="flex h-[calc(100vh-65px)] overflow-hidden bg-slate-950">
+        <div className="flex h-[calc(100vh-65px)] overflow-hidden bg-slate-950 relative">
+            {/* Mobile Sidebar Overlay */}
+            {sidebarOpen && (
+                <div 
+                    className="md:hidden fixed inset-0 bg-black/50 z-40" 
+                    onClick={() => setSidebarOpen(false)}
+                />
+            )}
+
             <ChatSidebar
                 isOpen={sidebarOpen}
+                onClose={() => setSidebarOpen(false)}
                 conversations={conversations}
                 currentConversationId={currentConversation?.id}
                 onNewChat={createConversation}

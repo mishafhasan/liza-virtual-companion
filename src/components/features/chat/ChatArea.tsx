@@ -1,9 +1,10 @@
-import React, { useRef, useEffect } from 'react';
-import { Send, Plus, Video, Phone, Settings, MoreVertical, Globe } from 'lucide-react';
+import React, { useRef, useEffect, useState } from 'react';
+import { Send, Plus, Video, Phone, Settings, MoreVertical, Globe, Menu } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { LizaLogo } from '@/components/shared/LizaLogo';
 import { EMOTION_COLORS, EMOTION_LABELS } from '@/constants';
@@ -46,6 +47,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     characterProfile
 }) => {
     const scrollRef = useRef<HTMLDivElement>(null);
+    const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
     useEffect(() => {
         if (scrollRef.current) {
@@ -58,43 +60,24 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             {/* Chat Header */}
             <div className="flex items-center justify-between p-4 border-b border-white/5 bg-slate-900/50 backdrop-blur-xl flex-shrink-0 z-20">
                 <div className="flex items-center gap-3">
-                    <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(!sidebarOpen)} className="text-gray-400 hover:text-white">
-                        <MoreVertical className="w-5 h-5" />
+                    <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(!sidebarOpen)} className="text-gray-400 hover:text-white md:hidden">
+                        <Menu className="w-5 h-5" />
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(!sidebarOpen)} className="text-gray-400 hover:text-white hidden md:flex">
+                        <Menu className="w-5 h-5" />
                     </Button>
                     {conversation ? (
                         <div className="flex items-center gap-2">
                             <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                            <span className="text-gray-300 text-sm font-medium hidden sm:block">Liza is online</span>
+                            <span className="text-gray-300 text-sm font-medium">Liza is online</span>
                         </div>
                     ) : (
                         <span className="text-gray-400 text-sm font-medium">Select a conversation</span>
                     )}
                 </div>
 
-                <div className="flex items-center gap-2">
-                    {/* Emotion Indicator */}
-                    <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 border border-white/10 transition-all"
-                         title={`Detected mood: ${EMOTION_LABELS[currentEmotion]}`}>
-                        <div className="w-2 h-2 rounded-full animate-pulse" 
-                             style={{ backgroundColor: EMOTION_COLORS[currentEmotion]?.primary || EMOTION_COLORS.neutral.primary }} />
-                        <span className="text-xs text-gray-400">{EMOTION_LABELS[currentEmotion]}</span>
-                    </div>
-
-                    {/* Quick Language Switcher */}
-                    <Select value={language} onValueChange={(v) => onLanguageChange?.(v as Language)}>
-                        <SelectTrigger className="w-[90px] bg-white/5 border-white/10 text-white text-xs h-8 gap-1">
-                            <Globe className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
-                            <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent className="bg-slate-900 border-white/10">
-                            <SelectItem value="English" className="text-white text-xs">English</SelectItem>
-                            <SelectItem value="Sinhala" className="text-white text-xs">සිංහල</SelectItem>
-                            <SelectItem value="Tamil" className="text-white text-xs">தமிழ்</SelectItem>
-                        </SelectContent>
-                    </Select>
-
-                    <div className="h-6 w-[1px] bg-white/10 hidden sm:block" />
-
+                {/* Action Buttons (Video & Phone always visible) */}
+                <div className="flex items-center gap-1">
                     <Button variant="ghost" size="icon" onClick={() => setIsVideoMode(!isVideoMode)}
                         className={`${isVideoMode ? 'text-purple-400 bg-purple-500/10' : 'text-gray-400 hover:text-white'}`}
                         title="Toggle Video Avatar">
@@ -109,24 +92,115 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             <Phone className="w-5 h-5" />
                         </div>
                     </Button>
-                    <Button variant="ghost" size="icon" onClick={onSettings} className="text-gray-400 hover:text-white" title="Settings">
-                        <Settings className="w-5 h-5" />
-                    </Button>
-                    <div className="h-6 w-[1px] bg-white/10 mx-2 hidden sm:block" />
-                    <div className="hidden sm:flex items-center gap-2">
-                        <span className="text-gray-500 text-xs">Personality:</span>
-                        <Select value={personality} onValueChange={(v) => setPersonality(v as AIPersonality)}>
-                            <SelectTrigger className="w-32 bg-white/5 border-white/10 text-white text-sm h-8">
+
+                    <div className="h-6 w-[1px] bg-white/10 mx-1" />
+
+                    {/* Desktop specific buttons */}
+                    <div className="hidden md:flex items-center gap-2">
+                        {/* Emotion Indicator */}
+                        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 border border-white/10 transition-all"
+                             title={`Detected mood: ${EMOTION_LABELS[currentEmotion]}`}>
+                            <div className="w-2 h-2 rounded-full animate-pulse" 
+                                 style={{ backgroundColor: EMOTION_COLORS[currentEmotion]?.primary || EMOTION_COLORS.neutral.primary }} />
+                            <span className="text-xs text-gray-400">{EMOTION_LABELS[currentEmotion]}</span>
+                        </div>
+
+                        {/* Quick Language Switcher */}
+                        <Select value={language} onValueChange={(v) => onLanguageChange?.(v as Language)}>
+                            <SelectTrigger className="w-[90px] bg-white/5 border-white/10 text-white text-xs h-8 gap-1">
+                                <Globe className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
                                 <SelectValue />
                             </SelectTrigger>
                             <SelectContent className="bg-slate-900 border-white/10">
-                                <SelectItem value="friendly" className="text-white">Friendly</SelectItem>
-                                <SelectItem value="professional" className="text-white">Professional</SelectItem>
-                                <SelectItem value="witty" className="text-white">Witty</SelectItem>
-                                <SelectItem value="empathetic" className="text-white">Empathetic</SelectItem>
-                                <SelectItem value="analytical" className="text-white">Analytical</SelectItem>
+                                <SelectItem value="English" className="text-white text-xs">English</SelectItem>
+                                <SelectItem value="Sinhala" className="text-white text-xs">සිංහල</SelectItem>
+                                <SelectItem value="Tamil" className="text-white text-xs">தமிழ்</SelectItem>
                             </SelectContent>
                         </Select>
+
+                        <div className="h-6 w-[1px] bg-white/10" />
+
+                        <Button variant="ghost" size="icon" onClick={onSettings} className="text-gray-400 hover:text-white" title="Settings">
+                            <Settings className="w-5 h-5" />
+                        </Button>
+                        <div className="h-6 w-[1px] bg-white/10 mx-1" />
+                        <div className="flex items-center gap-2">
+                            <span className="text-gray-500 text-xs">Personality:</span>
+                            <Select value={personality} onValueChange={(v) => setPersonality(v as AIPersonality)}>
+                                <SelectTrigger className="w-32 bg-white/5 border-white/10 text-white text-sm h-8">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent className="bg-slate-900 border-white/10">
+                                    <SelectItem value="friendly" className="text-white">Friendly</SelectItem>
+                                    <SelectItem value="professional" className="text-white">Professional</SelectItem>
+                                    <SelectItem value="witty" className="text-white">Witty</SelectItem>
+                                    <SelectItem value="empathetic" className="text-white">Empathetic</SelectItem>
+                                    <SelectItem value="analytical" className="text-white">Analytical</SelectItem>
+                                </SelectContent>
+                            </Select>
+                        </div>
+                    </div>
+
+                    {/* Mobile Options (Popover) */}
+                    <div className="flex md:hidden items-center">
+                        <Popover open={isMobileMenuOpen} onOpenChange={setIsMobileMenuOpen}>
+                            <PopoverTrigger asChild>
+                                <Button variant="ghost" size="icon" className="text-gray-400 hover:text-white">
+                                    <MoreVertical className="w-5 h-5" />
+                                </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-56 bg-slate-900 border-white/10 text-white p-3 flex flex-col gap-3" align="end">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-xs text-gray-400">Emotion</span>
+                                    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 border border-white/10">
+                                        <div className="w-2 h-2 rounded-full animate-pulse" 
+                                             style={{ backgroundColor: EMOTION_COLORS[currentEmotion]?.primary || EMOTION_COLORS.neutral.primary }} />
+                                        <span className="text-xs text-gray-300">{EMOTION_LABELS[currentEmotion]}</span>
+                                    </div>
+                                </div>
+                                
+                                <div className="flex items-center justify-between">
+                                    <span className="text-xs text-gray-400">Language</span>
+                                    <Select value={language} onValueChange={(v) => onLanguageChange?.(v as Language)}>
+                                        <SelectTrigger className="w-[100px] bg-white/5 border-white/10 text-white text-xs h-8">
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent className="bg-slate-900 border-white/10">
+                                            <SelectItem value="English" className="text-white text-xs">English</SelectItem>
+                                            <SelectItem value="Sinhala" className="text-white text-xs">සිංහල</SelectItem>
+                                            <SelectItem value="Tamil" className="text-white text-xs">தமிழ்</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+
+                                <div className="flex items-center justify-between">
+                                    <span className="text-xs text-gray-400">Personality</span>
+                                    <Select value={personality} onValueChange={(v) => setPersonality(v as AIPersonality)}>
+                                        <SelectTrigger className="w-[100px] bg-white/5 border-white/10 text-white text-xs h-8">
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent className="bg-slate-900 border-white/10 z-50">
+                                            <SelectItem value="friendly" className="text-white">Friendly</SelectItem>
+                                            <SelectItem value="professional" className="text-white">Professional</SelectItem>
+                                            <SelectItem value="witty" className="text-white">Witty</SelectItem>
+                                            <SelectItem value="empathetic" className="text-white">Empathetic</SelectItem>
+                                            <SelectItem value="analytical" className="text-white">Analytical</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+
+                                <div className="h-px bg-white/10 my-1" />
+                                
+                                <div className="flex justify-center">
+                                    <Button variant="ghost" size="icon" onClick={() => {
+                                        setIsMobileMenuOpen(false);
+                                        onSettings();
+                                    }} className="text-gray-400 hover:text-white" title="Settings">
+                                        <Settings className="w-5 h-5" />
+                                    </Button>
+                                </div>
+                            </PopoverContent>
+                        </Popover>
                     </div>
                 </div>
             </div>
