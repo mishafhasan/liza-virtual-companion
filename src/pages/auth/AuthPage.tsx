@@ -6,12 +6,19 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { LogoDisplay } from '@/components/shared/LizaLogo';
+import { SupabaseConfigErrorScreen } from '@/components/shared/SupabaseConfigErrorScreen';
 import { useAuth } from '@/stores/authStore';
+import { isSupabaseEnabled } from '@/services/supabase/supabaseClient';
 
 export const AuthPage: React.FC = () => {
     const navigate = useNavigate();
     const { login, signup, isLoading } = useAuth();
     const [authView, setAuthView] = useState<'login' | 'signup'>('login');
+
+    // Login requires a backend — block the form entirely if Supabase is missing.
+    if (!isSupabaseEnabled()) {
+        return <SupabaseConfigErrorScreen />;
+    }
 
     const [loginEmail, setLoginEmail] = useState('');
     const [loginPassword, setLoginPassword] = useState('');

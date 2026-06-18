@@ -223,24 +223,27 @@ export const ChatPage: React.FC = () => {
                         .then((result) => {
                             if (!result || !result.facts.length) return;
 
-                            // Save each extracted fact to local Zustand memory
-                            // with its [category] prefix for structured rendering.
-                            const addMemoryFn = useSettingsStore.getState().addMemory;
-                            for (const factItem of result.facts) {
-                                addMemoryFn({
+                            // Mirror the extracted facts into the local cache with their
+                            // category field (clean fact text, no prefix). The cloud RAG
+                            // write already happened inside summarizeMessageBatch — this is
+                            // purely a local cache update for instant UI display.
+                            const addMemories = useSettingsStore.getState().addMemories;
+                            addMemories(
+                                result.facts.map((f) => ({
                                     id: `mem-voice-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                                    fact: `[${factItem.category}] ${factItem.fact}`,
-                                });
-                            }
+                                    fact: f.fact,
+                                    category: f.category,
+                                })),
+                            );
 
                             const count = result.facts.length;
                             if (result.persisted) {
                                 toast.success(`${count} memory fact${count > 1 ? 's' : ''} saved`, {
                                     description: 'Key details from this voice conversation are stored for future context.',
                                 });
-                            } else if (!result.supabaseConfigured) {
-                                toast.success(`${count} memory fact${count > 1 ? 's' : ''} saved locally`, {
-                                    description: 'Supabase is not configured, so memories are only stored in this browser.',
+                            } else {
+                                toast.error('Memory not stored in Supabase', {
+                                    description: 'Facts were extracted, but the Supabase insert failed. Check the console for embedding or RLS errors.',
                                 });
                             }
                         })
@@ -334,13 +337,16 @@ export const ChatPage: React.FC = () => {
             summarizeMessageBatch(remainingTurns)
                 .then((result) => {
                     if (!result || !result.facts.length) return;
-                    const addMemoryFn = useSettingsStore.getState().addMemory;
-                    for (const factItem of result.facts) {
-                        addMemoryFn({
+                    // Mirror facts into local cache (clean text + category). Cloud RAG
+                    // write already happened in summarizeMessageBatch.
+                    const addMemories = useSettingsStore.getState().addMemories;
+                    addMemories(
+                        result.facts.map((f) => ({
                             id: `mem-voice-end-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                            fact: `[${factItem.category}] ${factItem.fact}`,
-                        });
-                    }
+                            fact: f.fact,
+                            category: f.category,
+                        })),
+                    );
                 })
                 .catch((err) => console.warn('[ChatPage] voice end-of-session memory flush skipped:', err));
         }
