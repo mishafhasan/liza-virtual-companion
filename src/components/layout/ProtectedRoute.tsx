@@ -4,20 +4,18 @@ import { Loader2 } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { isSupabaseEnabled } from '@/services/supabase/supabaseClient';
+import { SupabaseConfigErrorScreen } from '@/components/shared/SupabaseConfigErrorScreen';
 
 /**
- * Gates authenticated routes. Unauthenticated users are redirected to login.
+ * Gates authenticated routes. Login is REQUIRED — there is no local-only mode.
  *
- * Waits for `initialize()` to complete before deciding — this prevents the
- * "flash to /login" that would happen on a hard refresh while a valid Supabase
- * session exists but hasn't been restored from storage yet.
- *
- * Once the user is confirmed, `loadFromCloud()` hydrates settings and character
- * profile from Supabase (no-op in local-only mode).
- *
- * The auth initializer is only called once globally; settings are only loaded once
- * per user so navigating between /dashboard and /settings does not trigger
- * redundant network requests.
+ * - If Supabase is not configured → render {@link SupabaseConfigErrorScreen}.
+ *   No authenticated UI is reachable without a backend.
+ * - While the session is being restored → spinner (prevents the "flash to
+ *   /login" on a hard refresh while a valid session exists).
+ * - Once restored with no user → redirect to /login.
+ * - Once a user is confirmed → hydrate settings/profile/memories from Supabase
+ *   once per user via `loadFromCloud()`.
  */
 export const ProtectedRoute: React.FC = () => {
   const user = useAuthStore((s) => s.user);
@@ -33,12 +31,10 @@ export const ProtectedRoute: React.FC = () => {
 
   // Force a cloud refresh on every fresh mount by clearing the last-loaded
   // user id. This keeps settings, character profile, and memories in sync
-  // across devices after re-entering the app. In-app SPA navigation is
-  // already short-circuited via `lastCloudLoadedUserId`, so this only
-  // runs on full mount (hard refresh / tab open). No-op when Supabase is
-  // disabled — localStorage is the source of truth in that case.
+  // across devices after re-entering the app. In-app SPA navigation is already
+  // short-circuited via `lastCloudLoadedUserId`, so this only runs on full
+  // mount (hard refresh / tab open).
   useEffect(() => {
-    if (!isSupabaseEnabled()) return;
     useSettingsStore.setState({ lastCloudLoadedUserId: null });
   }, []);
 
@@ -61,6 +57,11 @@ export const ProtectedRoute: React.FC = () => {
     }
   }, [user, cloudLoaded, lastCloudLoadedUserId, loadFromCloud]);
 
+  // No backend → hard block. The user cannot reach any feature.
+  if (!isSupabaseEnabled()) {
+    return <SupabaseConfigErrorScreen />;
+  }
+
   // Still checking session — show a centered spinner.
   if (!initialized) {
     return (
@@ -71,7 +72,7 @@ export const ProtectedRoute: React.FC = () => {
   }
 
   if (!user) {
-    return <Navigate to="/" replace />;
+    return <Navigate to="/login" replace />;
   }
 
   return <Outlet />;

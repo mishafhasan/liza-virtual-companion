@@ -11,6 +11,9 @@
  *                        Used for the AI provider keys (Gemini, Pollinations).
  *  - `import.meta.env.VITE_*` -> standard Vite client env. Used for Supabase,
  *                        which is safe to expose (protected by Row Level Security).
+ *
+ * Supabase is REQUIRED to run the app — there is no local-only fallback.
+ * Gemini/Pollinations remain optional (AI calls degrade gracefully when missing).
  */
 
 /** Read a `process.env` value injected via Vite `define`, tolerating undefined. */
@@ -45,6 +48,20 @@ export const env = {
 /** True when a Gemini key is configured and AI features can run. */
 export const hasGeminiKey = (): boolean => env.geminiApiKey.length > 0;
 
-/** True when Supabase is configured. When false, the app runs in local-only mode. */
+/** True when Supabase is configured. Used by UI gates to show a config-error screen. */
 export const hasSupabase = (): boolean =>
   env.supabaseUrl.length > 0 && env.supabaseAnonKey.length > 0;
+
+/**
+ * Throws if Supabase is not configured. Supabase is REQUIRED — there is no
+ * local-only mode anymore. Use this in services/stores where the absence of a
+ * backend is a programmer/deployment error, not a recoverable state.
+ */
+export function requireSupabaseConfig(): void {
+  if (!hasSupabase()) {
+    throw new Error(
+      'Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY ' +
+        'in your environment. The app cannot run without a backend.',
+    );
+  }
+}

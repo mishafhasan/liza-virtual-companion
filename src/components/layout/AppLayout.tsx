@@ -2,7 +2,6 @@ import React, { useEffect, useRef } from 'react';
 import { Outlet } from 'react-router-dom';
 import { Header } from './Header';
 import { addTimeSpent, updateStreak } from '@/services/supabase/userStatsService';
-import { isSupabaseEnabled } from '@/services/supabase/supabaseClient';
 
 /**
  * AppLayout wraps all authenticated routes.
@@ -20,7 +19,7 @@ export const AppLayout: React.FC = () => {
     const isVisibleRef = useRef<boolean>(true);
 
     const flushTime = () => {
-        if (!isSupabaseEnabled() || !isVisibleRef.current) return;
+        if (!isVisibleRef.current) return;
         const now = new Date();
         const seconds = Math.floor((now.getTime() - lastFlushRef.current.getTime()) / 1000);
         if (seconds >= 10) {
