@@ -2,12 +2,13 @@
  * Conversation persistence service.
  *
  * Wraps all Supabase reads/writes for `conversation_sessions` and
- * `conversation_turns` so the hooks stay clean. Every function is a no-op
- * (returns null / void silently) when Supabase is not configured, preserving
- * local-only mode without any conditional logic in the calling hooks.
+ * `conversation_turns`, plus the RAG memory pipeline. Supabase is required —
+ * callers are behind the auth gate, so these functions assume the client and
+ * user are available.
  */
 
-import { getSupabaseClient, isSupabaseEnabled } from './supabaseClient';
+import { getSupabaseClient } from './supabaseClient';
+import { useAuthStore } from '@/stores/authStore';
 import { generateText, generateJson } from '@/services/ai/chatService';
 import { toast } from 'sonner';
 import type { AppMode } from '@/types';
@@ -32,12 +33,6 @@ export interface DBTurn {
   created_at: string;
 }
 
-export interface MemorySummaryResult {
-  summary: string;
-  persisted: boolean;
-  supabaseConfigured: boolean;
-}
-
 /** A structured memory fact extracted from conversation. */
 export interface MemoryFact {
   /** The fact itself — concise, third-person, max ~20 words. */
@@ -53,7 +48,8 @@ export interface MemoryFact {
     | 'goal'             // plans, aspirations, things they want
     | 'work_context'     // job, study, career, projects
     | 'emotion_pattern'  // recurring moods, emotional tendencies
-    | 'relationship';    // family, friends, romantic life
+    | 'relationship'     // family, friends, romantic life
+    | 'other';           // legacy / uncategorized
   /**
    * Importance score (0–1) used when writing to the RAG `memories` table.
    * Higher = more likely to surface in future retrieval.
@@ -65,7 +61,6 @@ export interface MemoryFact {
 export interface MemoryBatchResult {
   facts: MemoryFact[];
   persisted: boolean;
-  supabaseConfigured: boolean;
 }
 
 /** Minimal conversation turn type used for memory extraction. */
@@ -74,28 +69,34 @@ export interface MemoryTurn {
   content: string;
 }
 
+/**
+ * Reads the current user id from the auth store (synchronous, no network call).
+ * Throws if there's no authenticated user — every write requires one.
+ */
+function requireUserId(): string {
+  const userId = useAuthStore.getState().userId;
+  if (!userId) throw new Error('No authenticated user.');
+  return userId;
+}
+
 // ─── Session helpers ──────────────────────────────────────────────────────────
 
 /**
- * Creates a new session row and returns its UUID.
- * Returns null silently when Supabase is unavailable.
+ * Creates a new session row and returns its UUID, or null if it could not be
+ * created (auth or DB error). Callers treat null as "no persistence this run".
  */
 export async function createSession(
   mode: AppMode,
   title?: string,
   metadata?: Record<string, unknown>,
 ): Promise<string | null> {
-  if (!isSupabaseEnabled()) return null;
+  const userId = requireUserId();
   const supabase = await getSupabaseClient();
-  if (!supabase) return null;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
 
   const { data, error } = await supabase
     .from('conversation_sessions')
     .insert({
-      user_id: user.id,
+      user_id: userId,
       mode,
       title: title ?? null,
       metadata: metadata ?? {},
@@ -117,9 +118,8 @@ export async function closeSession(
   sessionId: string,
   metadata?: Record<string, unknown>,
 ): Promise<void> {
-  if (!isSupabaseEnabled() || !sessionId) return;
+  if (!sessionId) return;
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
 
   const update: Record<string, unknown> = { ended_at: new Date().toISOString() };
   if (metadata) update.metadata = metadata;
@@ -143,14 +143,10 @@ export async function closeSession(
 /**
  * Deletes a session and all its turns (cascade delete).
  * Throws on any Supabase error so callers can handle it with try/catch.
- * In local-only mode (no Supabase) this is a no-op and resolves successfully.
  */
 export async function deleteSession(sessionId: string): Promise<void> {
   if (!sessionId) throw new Error('No session ID provided');
-  if (!isSupabaseEnabled()) return; // local-only mode: state is handled by caller
-
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
 
   const { error } = await supabase
     .from('conversation_sessions')
@@ -170,9 +166,8 @@ export async function updateSessionTitle(
   sessionId: string,
   title: string,
 ): Promise<void> {
-  if (!isSupabaseEnabled() || !sessionId) return;
+  if (!sessionId) return;
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
 
   await supabase
     .from('conversation_sessions')
@@ -191,16 +186,13 @@ export async function saveTurn(
   content: string,
   emotion?: string,
 ): Promise<void> {
-  if (!isSupabaseEnabled() || !sessionId) return;
+  if (!sessionId) return;
+  const userId = requireUserId();
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return;
 
   const { error } = await supabase.from('conversation_turns').insert({
     session_id: sessionId,
-    user_id: user.id,
+    user_id: userId,
     speaker,
     content,
     emotion: emotion ?? null,
@@ -225,21 +217,17 @@ export async function saveTurnPair(
   lizaContent: string,
   emotion?: string,
 ): Promise<void> {
-  if (!isSupabaseEnabled() || !sessionId) return;
+  if (!sessionId) return;
+  const userId = requireUserId();
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return;
 
   const { error } = await supabase.from('conversation_turns').insert([
-    { session_id: sessionId, user_id: user.id, speaker: 'user',  content: userContent, emotion: null },
-    { session_id: sessionId, user_id: user.id, speaker: 'liza',  content: lizaContent, emotion: emotion ?? null },
+    { session_id: sessionId, user_id: userId, speaker: 'user', content: userContent, emotion: null },
+    { session_id: sessionId, user_id: userId, speaker: 'liza', content: lizaContent, emotion: emotion ?? null },
   ]);
 
   if (error) {
     console.error('[conversationService] saveTurnPair error:', error.message);
-    return;
   }
 }
 
@@ -254,20 +242,17 @@ export async function saveTurnPair(
  *  2. Call the `match_memories` Postgres RPC for cosine-similarity search.
  *  3. Return the top fact strings (already ranked by similarity × importance).
  *
- * Returns an empty array silently when Supabase is unavailable or on any error
- * so the caller can proceed without memory context rather than failing.
+ * Returns an empty array on any error so the caller can proceed without memory
+ * context rather than failing the whole reply.
  */
 export async function retrieveRelevantMemories(
   query: string,
   matchCount = 6,
   matchThreshold = 0.62,
 ): Promise<string[]> {
-  if (!isSupabaseEnabled() || !query.trim()) return [];
+  if (!query.trim()) return [];
+  const userId = requireUserId();
   const supabase = await getSupabaseClient();
-  if (!supabase) return [];
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return [];
 
   try {
     // 1. Embed the current user message.
@@ -282,14 +267,15 @@ export async function retrieveRelevantMemories(
       query_embedding: embData.embedding,
       match_threshold: matchThreshold,
       match_count: matchCount,
-      filter_user_id: user.id,
+      filter_user_id: userId,
     });
 
     if (rpcError || !memories) return [];
 
     // 3. Return just the fact strings; the RPC already orders by relevance.
     return (memories as Array<{ fact: string }>).map((m) => m.fact);
-  } catch {
+  } catch (err) {
+    console.warn('[conversationService] retrieveRelevantMemories failed:', (err as Error).message);
     return [];
   }
 }
@@ -351,18 +337,24 @@ const MEMORY_FALLBACK_SYSTEM_PROMPT =
 
 /**
  * Generates an embedding for the given text and stores a memory fact in the
- * `memories` table. Silently skips when Supabase is unavailable.
+ * `memories` table.
  *
- * Exported so mid-conversation summarization (every-N-messages) can reuse
- * the same RAG pipeline without duplicating the embedding & insert logic.
+ * Now stores the `category` column (previously the category was stuffed as a
+ * `[category]` prefix into the fact text, which caused a dual-write divergence
+ * between the RAG pipeline and the UI list). Manual additions also route
+ * through here so EVERY memory gets an embedding and becomes RAG-retrievable.
+ *
+ * @param fact       Clean fact text — NO category prefix.
+ * @param importance 0–1 importance score.
+ * @param category   Memory category (defaults to 'other').
  */
 export async function embedAndStoreMemory(
   fact: string,
   importance = 0.7,
+  category: MemoryFact['category'] = 'other',
 ): Promise<boolean> {
-  if (!isSupabaseEnabled()) return false;
+  const userId = requireUserId();
   const supabase = await getSupabaseClient();
-  if (!supabase) return false;
 
   try {
     const { data: embData, error: embError } = await supabase.functions.invoke(
@@ -375,20 +367,15 @@ export async function embedAndStoreMemory(
       return false;
     }
 
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) {
-      console.warn('[conversationService] embed memory auth failed:', authError?.message);
-      return false;
-    }
-
     // Upsert so duplicate facts (same user + same fact text) silently update
     // rather than returning a 409 conflict from PostgREST.
     const { error: insertError } = await supabase.from('memories').upsert(
       {
-        user_id: user.id,
+        user_id: userId,
         fact,
         embedding: embData.embedding,
         importance,
+        category,
       },
       { onConflict: 'user_id,fact' },
     );
@@ -409,12 +396,10 @@ export async function embedAndStoreMemory(
  * Extracts multiple categorized memory facts from a conversation using Gemini,
  * then embeds and stores each one in the RAG pipeline.
  *
- * This replaces the old `summarizeMessageBatch` (single-fact extraction) with
- * a ChatGPT/Claude-style multi-fact approach that:
- * - Processes BOTH user and assistant turns for richer context
- * - Extracts 2–7 distinct, categorized facts per batch
- * - Assigns per-fact importance scores for smarter RAG retrieval
- * - Persists each fact as a separate embedding for fine-grained recall
+ * This is the SINGLE writer of extracted memories to the cloud. Callers (chat
+ * hooks) push the returned facts into the local cache themselves — they no
+ * longer call `addMemory` with a prefixed string, which previously caused a
+ * duplicate, divergent row.
  *
  * @param turns   Full conversation turns (user + assistant), newest last.
  * @param options Optional overrides for the default importance multiplier.
@@ -481,22 +466,17 @@ export async function summarizeMessageBatch(
     importance: Math.min(1.0, Math.max(0.0, f.importance * multiplier)),
   }));
 
-  const supabaseConfigured = isSupabaseEnabled();
-  let anyPersisted = false;
+  // Embed and store each fact individually so each gets its own vector for
+  // recall. embedAndStoreMemory is resilient (returns false on failure) so one
+  // bad embedding doesn't abort the whole batch.
+  const results = await Promise.all(
+    scaledFacts.map((f) => embedAndStoreMemory(f.fact, f.importance, f.category)),
+  );
+  const anyPersisted = results.some(Boolean);
 
-  if (supabaseConfigured) {
-    // Embed and store each fact individually so each gets its own vector for recall.
-    const results = await Promise.all(
-      scaledFacts.map((f) => embedAndStoreMemory(f.fact, f.importance)),
-    );
-    anyPersisted = results.some(Boolean);
-  }
-
-  // Return the full result including all facts (callers can save locally too).
   return {
     facts: scaledFacts,
     persisted: anyPersisted,
-    supabaseConfigured,
   };
 }
 
@@ -511,9 +491,8 @@ export async function summarizeMessageBatch(
 export async function summarizeAndStoreSessionMemory(
   sessionId: string,
 ): Promise<void> {
-  if (!isSupabaseEnabled() || !sessionId) return;
+  if (!sessionId) return;
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
 
   const dbTurns = await loadTurns(sessionId);
   if (dbTurns.length < 3) return;
@@ -533,7 +512,7 @@ export async function summarizeAndStoreSessionMemory(
       });
     } else {
       toast.error('Memory not stored in Supabase', {
-        description: 'Facts were extracted locally, but the Supabase insert failed. Check the console for embedding or RLS errors.',
+        description: 'Facts were extracted, but the Supabase insert failed. Check the console for embedding or RLS errors.',
       });
     }
   }
@@ -543,23 +522,18 @@ export async function summarizeAndStoreSessionMemory(
 
 /**
  * Loads past sessions for the current user, newest first.
- * Returns an empty array when Supabase is unavailable.
  */
 export async function loadSessions(
   mode?: AppMode,
   limit = 20,
 ): Promise<DBSession[]> {
-  if (!isSupabaseEnabled()) return [];
+  const userId = requireUserId();
   const supabase = await getSupabaseClient();
-  if (!supabase) return [];
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return [];
 
   let query = supabase
     .from('conversation_sessions')
     .select('id, title, mode, started_at, ended_at, metadata')
-    .eq('user_id', user.id)
+    .eq('user_id', userId)
     .order('started_at', { ascending: false })
     .limit(limit);
 
@@ -577,9 +551,8 @@ export async function loadSessions(
  * Loads all turns for a given session, ordered chronologically.
  */
 export async function loadTurns(sessionId: string): Promise<DBTurn[]> {
-  if (!isSupabaseEnabled() || !sessionId) return [];
+  if (!sessionId) return [];
   const supabase = await getSupabaseClient();
-  if (!supabase) return [];
 
   const { data, error } = await supabase
     .from('conversation_turns')

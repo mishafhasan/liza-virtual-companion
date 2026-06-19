@@ -1,11 +1,13 @@
 /**
  * User statistics service.
  *
- * Handles XP tracking, streaks, time spent, and recent activity.
- * All functions are no-op when Supabase is not configured.
+ * Handles XP tracking, streaks, time spent, and recent activity. Supabase +
+ * auth are required — callers are behind the auth gate. The user id is read
+ * synchronously from the auth store (no per-call `auth.getUser()` round-trip).
  */
 
-import { getSupabaseClient, isSupabaseEnabled } from './supabaseClient';
+import { getSupabaseClient } from './supabaseClient';
+import { useAuthStore } from '@/stores/authStore';
 import type { AppMode } from '@/types';
 
 type TrackedMode = Exclude<AppMode, null>;
@@ -34,9 +36,8 @@ export interface DashboardStatsSnapshot {
   displayName: string;
   recentActivity: RecentActivity | null;
   /**
-   * The Supabase user id the snapshot was fetched for, or `null` if we
-   * returned graceful defaults because Supabase / auth wasn't ready yet.
-   * Callers use this to decide whether the result is safe to cache.
+   * The Supabase user id the snapshot was fetched for, or `null` if there was
+   * no current user. Callers use this to decide whether the result is cacheable.
    */
   userId: string | null;
 }
@@ -52,9 +53,17 @@ const DEFAULT_STATS: UserStats = {
   interview_xp: 0,
 };
 
+/**
+ * Reads the current user id from the auth store. Returns null if there is no
+ * authenticated user yet (e.g. still hydrating) so callers can return defaults
+ * instead of throwing during the initial dashboard mount.
+ */
+function getUserId(): string | null {
+  return useAuthStore.getState().userId;
+}
+
 async function ensureUserStats(userId: string): Promise<void> {
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
 
   const { error } = await supabase
     .from('user_stats')
@@ -95,25 +104,19 @@ function displayNameFromUser(user: {
 // ─── Stats Retrieval ──────────────────────────────────────────────────────────
 
 /**
- * Get user statistics (XP, streaks, time spent)
- * Returns default values when Supabase is unavailable
+ * Get user statistics (XP, streaks, time spent). Returns default values if no
+ * row exists yet (and seeds one).
  */
-export async function getUserStats(): Promise<UserStats | null> {
-  if (!isSupabaseEnabled()) {
-    // Return default values for local-only mode
-    return DEFAULT_STATS;
-  }
+export async function getUserStats(): Promise<UserStats> {
+  const userId = getUserId();
+  if (!userId) return DEFAULT_STATS;
 
   const supabase = await getSupabaseClient();
-  if (!supabase) return null;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
 
   const { data, error } = await supabase
     .from('user_stats')
     .select('*')
-    .eq('user_id', user.id)
+    .eq('user_id', userId)
     .maybeSingle();
 
   if (error) {
@@ -122,7 +125,7 @@ export async function getUserStats(): Promise<UserStats | null> {
   }
 
   if (!data) {
-    await ensureUserStats(user.id);
+    await ensureUserStats(userId);
     return DEFAULT_STATS;
   }
 
@@ -130,16 +133,14 @@ export async function getUserStats(): Promise<UserStats | null> {
 }
 
 /**
- * Load all dashboard stats with one auth lookup and parallel DB reads.
- * This avoids the dashboard doing three separate `auth.getUser()` calls.
+ * Load all dashboard stats with parallel DB reads (single auth lookup, cached).
  *
- * Returns `userId: null` when the snapshot is a graceful fallback (Supabase
- * disabled, client not yet ready, or no current user). Hooks must NOT cache
- * `userId === null` results because they trigger the "all zeros / Explorer"
- * stuck-30s state when navigation races auth hydration.
+ * Returns `userId: null` when there is no current user yet. Hooks must NOT
+ * cache `userId === null` results because they represent an unhydrated state.
  */
 export async function getDashboardStatsSnapshot(): Promise<DashboardStatsSnapshot> {
-  if (!isSupabaseEnabled()) {
+  const userId = getUserId();
+  if (!userId) {
     return {
       stats: DEFAULT_STATS,
       displayName: 'Explorer',
@@ -149,42 +150,22 @@ export async function getDashboardStatsSnapshot(): Promise<DashboardStatsSnapsho
   }
 
   const supabase = await getSupabaseClient();
-  if (!supabase) {
-    return {
-      stats: DEFAULT_STATS,
-      displayName: 'Explorer',
-      recentActivity: null,
-      userId: null,
-    };
-  }
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return {
-      stats: DEFAULT_STATS,
-      displayName: 'Explorer',
-      recentActivity: null,
-      userId: null,
-    };
-  }
-
-  const fallbackName = displayNameFromUser(user);
 
   const [statsResult, profileResult, activityResult] = await Promise.all([
     supabase
       .from('user_stats')
       .select('total_xp, current_streak, longest_streak, last_activity_date, total_time_seconds, entertainment_xp, language_xp, interview_xp')
-      .eq('user_id', user.id)
+      .eq('user_id', userId)
       .maybeSingle(),
     supabase
       .from('profiles')
       .select('display_name')
-      .eq('id', user.id)
+      .eq('id', userId)
       .maybeSingle(),
     supabase
       .from('recent_activity')
       .select('mode, conversation_session_id, last_accessed_at')
-      .eq('user_id', user.id)
+      .eq('user_id', userId)
       .order('last_accessed_at', { ascending: false })
       .limit(1)
       .maybeSingle(),
@@ -201,14 +182,19 @@ export async function getDashboardStatsSnapshot(): Promise<DashboardStatsSnapsho
   }
 
   if (!statsResult.data) {
-    void ensureUserStats(user.id);
+    void ensureUserStats(userId);
   }
+
+  // Prefer the profile display name; fall back to the auth store's cached name.
+  const fallbackName =
+    useAuthStore.getState().user?.name ??
+    displayNameFromUser({ email: useAuthStore.getState().user?.email });
 
   return {
     stats: (statsResult.data as UserStats | null) ?? DEFAULT_STATS,
-    displayName: profileResult.data?.display_name || fallbackName,
+    displayName: profileResult.data?.display_name || fallbackName || 'Explorer',
     recentActivity: (activityResult.data as RecentActivity | null) ?? null,
-    userId: user.id,
+    userId,
   };
 }
 
@@ -216,21 +202,20 @@ export async function getDashboardStatsSnapshot(): Promise<DashboardStatsSnapsho
  * Get user's display name from profile
  */
 export async function getUserDisplayName(): Promise<string> {
-  if (!isSupabaseEnabled()) return 'Explorer';
+  const userId = getUserId();
+  if (!userId) return 'Explorer';
 
   const supabase = await getSupabaseClient();
-  if (!supabase) return 'Explorer';
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return 'Explorer';
 
   const { data, error } = await supabase
     .from('profiles')
     .select('display_name')
-    .eq('id', user.id)
+    .eq('id', userId)
     .maybeSingle();
 
-  const fallbackName = displayNameFromUser(user);
+  const fallbackName =
+    useAuthStore.getState().user?.name ??
+    'Explorer';
 
   if (error || !data) return fallbackName;
 
@@ -246,16 +231,14 @@ export async function addXP(
   amount: number,
   mode?: TrackedMode,
 ): Promise<void> {
-  if (!isSupabaseEnabled() || amount <= 0) return;
+  if (amount <= 0) return;
+  const userId = getUserId();
+  if (!userId) return;
 
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return;
 
   const { error } = await supabase.rpc('add_user_xp', {
-    p_user_id: user.id,
+    p_user_id: userId,
     p_xp: amount,
     p_mode: mode || null,
   });
@@ -271,16 +254,14 @@ export async function addXP(
  * Add time spent in the app (in seconds)
  */
 export async function addTimeSpent(seconds: number): Promise<void> {
-  if (!isSupabaseEnabled() || seconds <= 0) return;
+  if (seconds <= 0) return;
+  const userId = getUserId();
+  if (!userId) return;
 
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return;
 
   const { error } = await supabase.rpc('add_time_spent', {
-    p_user_id: user.id,
+    p_user_id: userId,
     p_seconds: seconds,
   });
 
@@ -295,18 +276,15 @@ export async function addTimeSpent(seconds: number): Promise<void> {
  * Start an activity session (tracks time in a specific mode)
  */
 export async function startActivitySession(mode: TrackedMode): Promise<string | null> {
-  if (!isSupabaseEnabled()) return null;
+  const userId = getUserId();
+  if (!userId) return null;
 
   const supabase = await getSupabaseClient();
-  if (!supabase) return null;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
 
   const { data, error } = await supabase
     .from('activity_sessions')
     .insert({
-      user_id: user.id,
+      user_id: userId,
       mode,
       session_start: new Date().toISOString(),
     })
@@ -328,10 +306,9 @@ export async function endActivitySession(
   sessionId: string,
   xpEarned: number = 0,
 ): Promise<void> {
-  if (!isSupabaseEnabled() || !sessionId) return;
+  if (!sessionId) return;
 
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
 
   const now = new Date().toISOString();
 
@@ -381,18 +358,15 @@ export async function updateRecentActivity(
   mode: TrackedMode,
   conversationSessionId: string,
 ): Promise<void> {
-  if (!isSupabaseEnabled()) return;
+  const userId = getUserId();
+  if (!userId) return;
 
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return;
 
   const { error } = await supabase
     .from('recent_activity')
     .upsert({
-      user_id: user.id,
+      user_id: userId,
       mode,
       conversation_session_id: conversationSessionId,
       last_accessed_at: new Date().toISOString(),
@@ -409,18 +383,15 @@ export async function updateRecentActivity(
  * Get recent activity for a specific mode
  */
 export async function getRecentActivity(mode: TrackedMode): Promise<RecentActivity | null> {
-  if (!isSupabaseEnabled()) return null;
+  const userId = getUserId();
+  if (!userId) return null;
 
   const supabase = await getSupabaseClient();
-  if (!supabase) return null;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
 
   const { data, error } = await supabase
     .from('recent_activity')
     .select('mode, conversation_session_id, last_accessed_at')
-    .eq('user_id', user.id)
+    .eq('user_id', userId)
     .eq('mode', mode)
     .single();
 
@@ -436,18 +407,15 @@ export async function getRecentActivity(mode: TrackedMode): Promise<RecentActivi
  * Get the most recent activity across all modes
  */
 export async function getMostRecentActivity(): Promise<RecentActivity | null> {
-  if (!isSupabaseEnabled()) return null;
+  const userId = getUserId();
+  if (!userId) return null;
 
   const supabase = await getSupabaseClient();
-  if (!supabase) return null;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
 
   const { data, error } = await supabase
     .from('recent_activity')
     .select('mode, conversation_session_id, last_accessed_at')
-    .eq('user_id', user.id)
+    .eq('user_id', userId)
     .order('last_accessed_at', { ascending: false })
     .limit(1)
     .single();
@@ -465,16 +433,13 @@ export async function getMostRecentActivity(): Promise<RecentActivity | null> {
  * Manually trigger streak update (usually called on app open)
  */
 export async function updateStreak(): Promise<void> {
-  if (!isSupabaseEnabled()) return;
+  const userId = getUserId();
+  if (!userId) return;
 
   const supabase = await getSupabaseClient();
-  if (!supabase) return;
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return;
 
   const { error } = await supabase.rpc('update_user_streak', {
-    p_user_id: user.id,
+    p_user_id: userId,
   });
 
   if (error) {
