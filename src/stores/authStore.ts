@@ -1,24 +1,37 @@
 import { create } from 'zustand';
 import { toast } from 'sonner';
-import { getSupabaseClient, isSupabaseEnabled } from '@/services/supabase/supabaseClient';
+import { getSupabaseClient } from '@/services/supabase/supabaseClient';
+import { clearAllCaches } from '@/services/sync/cache';
+import { clearQueue } from '@/services/sync/queue';
+import { initSyncQueue } from '@/services/sync/syncQueue';
+import { useSettingsStore } from '@/stores/settingsStore';
 import type { User, LoginCredentials, SignupCredentials } from '@/types';
 
 /**
- * Authentication store (Zustand).
+ * Authentication store (Zustand). Supabase + login are REQUIRED — there is no
+ * local-only / mock-auth fallback.
  *
- * When VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY are set, all auth actions
- * go through Supabase Auth and the session is managed by the Supabase SDK
- * (stored in localStorage, auto-refreshed). The `initialized` flag lets
- * ProtectedRoute wait for the initial session check before redirecting.
+ * The Supabase session is managed by the SDK (persisted in localStorage,
+ * auto-refreshed). The `initialized` flag lets ProtectedRoute wait for the
+ * initial session check before redirecting.
  *
- * When Supabase is not configured, the store falls back to local mock auth so
- * the app still works in local-only mode.
+ * `userId` is cached in the store after login so every downstream service can
+ * read it synchronously instead of calling `supabase.auth.getUser()` on every
+ * write (a major source of network round-trips).
+ *
+ * On logout, ALL local state is wiped: the cloud cache (liza-app-state), the
+ * in-memory chat/stats caches, and the sync queue. A fresh login re-hydrates
+ * purely from the cloud — local is always a faithful cache of the cloud.
  */
 interface AuthStore {
   user: User | null;
+  /** Cached Supabase user id — read by services to avoid per-write getUser() calls. */
+  userId: string | null;
   isLoading: boolean;
   /** True once the initial getSession() check has completed. */
   initialized: boolean;
+  /** True when Supabase env vars are missing — the UI gates on this. */
+  configError: boolean;
   login: (credentials: LoginCredentials) => Promise<void>;
   signup: (credentials: SignupCredentials) => Promise<void>;
   logout: () => Promise<void>;
@@ -39,26 +52,22 @@ function toAppUser(supaUser: { id: string; email?: string | null }, displayName?
   };
 }
 
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 export const useAuthStore = create<AuthStore>()((set, get) => ({
   user: null,
+  userId: null,
   isLoading: false,
   initialized: false,
+  configError: false,
 
   // ─── Initialize ────────────────────────────────────────────────────────────
   initialize: async () => {
     if (get().initialized) return;
 
-    if (!isSupabaseEnabled()) {
-      // Local-only mode: no session to restore.
-      set({ initialized: true });
-      return;
-    }
-
-    const supabase = await getSupabaseClient();
+    const supabase = await getSupabaseClient().catch(() => null);
     if (!supabase) {
-      set({ initialized: true });
+      // Supabase env vars are missing. UI gates will render the config-error
+      // screen. Mark initialized so ProtectedRoute doesn't spin forever.
+      set({ initialized: true, configError: true });
       return;
     }
 
@@ -70,7 +79,13 @@ export const useAuthStore = create<AuthStore>()((set, get) => ({
         .select('display_name')
         .eq('id', session.user.id)
         .single();
-      set({ user: toAppUser(session.user, profile?.display_name), initialized: true });
+      set({
+        user: toAppUser(session.user, profile?.display_name),
+        userId: session.user.id,
+        initialized: true,
+      });
+      // Replay any writes left in the queue from a previous session.
+      initSyncQueue();
     } else {
       set({ initialized: true });
     }
@@ -83,9 +98,12 @@ export const useAuthStore = create<AuthStore>()((set, get) => ({
           .select('display_name')
           .eq('id', session.user.id)
           .single();
-        set({ user: toAppUser(session.user, profile?.display_name) });
+        set({
+          user: toAppUser(session.user, profile?.display_name),
+          userId: session.user.id,
+        });
       } else {
-        set({ user: null });
+        set({ user: null, userId: null });
       }
     });
   },
@@ -94,37 +112,24 @@ export const useAuthStore = create<AuthStore>()((set, get) => ({
   login: async ({ email, password }) => {
     set({ isLoading: true });
 
-    if (isSupabaseEnabled()) {
-      const supabase = await getSupabaseClient();
-      if (!supabase) { set({ isLoading: false }); return; }
-
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error || !data.user) {
-        set({ isLoading: false });
-        toast.error(error?.message ?? 'Login failed');
-        throw error ?? new Error('Login failed');
-      }
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('display_name')
-        .eq('id', data.user.id)
-        .single();
-      set({ user: toAppUser(data.user, profile?.display_name), isLoading: false });
-      toast.success('Welcome back!');
-      return;
-    }
-
-    // ── Local-only fallback ──
-    await new Promise((r) => setTimeout(r, 800));
-    if (!EMAIL_REGEX.test(email) || password.length < 6) {
+    const supabase = await getSupabaseClient();
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error || !data.user) {
       set({ isLoading: false });
-      toast.error('Invalid credentials');
-      throw new Error('Invalid credentials');
+      toast.error(error?.message ?? 'Login failed');
+      throw error ?? new Error('Login failed');
     }
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('display_name')
+      .eq('id', data.user.id)
+      .single();
     set({
-      user: { id: 'local-' + Date.now(), email, name: email.split('@')[0], createdAt: new Date(), lastLoginAt: new Date() },
+      user: toAppUser(data.user, profile?.display_name),
+      userId: data.user.id,
       isLoading: false,
     });
+    initSyncQueue();
     toast.success('Welcome back!');
   },
 
@@ -132,52 +137,52 @@ export const useAuthStore = create<AuthStore>()((set, get) => ({
   signup: async ({ email, password, name }) => {
     set({ isLoading: true });
 
-    if (isSupabaseEnabled()) {
-      const supabase = await getSupabaseClient();
-      if (!supabase) { set({ isLoading: false }); return; }
-
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: { data: { display_name: name } },
-      });
-      if (error || !data.user) {
-        set({ isLoading: false });
-        toast.error(error?.message ?? 'Sign up failed');
-        throw error ?? new Error('Sign up failed');
-      }
-      // If email confirmation is disabled the session is live immediately.
-      if (data.session) {
-        set({ user: toAppUser(data.user, name), isLoading: false });
-        toast.success('Account created!');
-      } else {
-        set({ isLoading: false });
-        toast.success('Check your email to confirm your account.');
-      }
-      return;
-    }
-
-    // ── Local-only fallback ──
-    await new Promise((r) => setTimeout(r, 1000));
-    if (!EMAIL_REGEX.test(email) || password.length < 8 || name.trim().length < 2) {
-      set({ isLoading: false });
-      toast.error('Please check your inputs');
-      throw new Error('Invalid inputs');
-    }
-    set({
-      user: { id: 'local-' + Date.now(), email, name, createdAt: new Date(), lastLoginAt: new Date() },
-      isLoading: false,
+    const supabase = await getSupabaseClient();
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { display_name: name } },
     });
-    toast.success('Account created!');
+    if (error || !data.user) {
+      set({ isLoading: false });
+      toast.error(error?.message ?? 'Sign up failed');
+      throw error ?? new Error('Sign up failed');
+    }
+    // If email confirmation is disabled the session is live immediately.
+    if (data.session) {
+      set({
+        user: toAppUser(data.user, name),
+        userId: data.user.id,
+        isLoading: false,
+      });
+      initSyncQueue();
+      toast.success('Account created!');
+    } else {
+      set({ isLoading: false });
+      toast.success('Check your email to confirm your account.');
+    }
   },
 
   // ─── Logout ────────────────────────────────────────────────────────────────
+  // Wipes ALL local state so the next user starts from a clean, cloud-only cache.
   logout: async () => {
-    if (isSupabaseEnabled()) {
-      const supabase = await getSupabaseClient();
-      await supabase?.auth.signOut();
+    const supabase = await getSupabaseClient().catch(() => null);
+    await supabase?.auth.signOut();
+
+    // 1. Drop pending sync writes (they belong to the outgoing user).
+    clearQueue();
+    // 2. Clear in-memory chat/stats caches.
+    clearAllCaches();
+    // 3. Reset the settings/character/memory store back to defaults.
+    useSettingsStore.getState().resetStore();
+    // 4. Wipe the localStorage cloud cache (settings/character/memory).
+    try {
+      localStorage.removeItem('liza-app-state');
+    } catch {
+      /* ignore */
     }
-    set({ user: null });
+
+    set({ user: null, userId: null });
     toast.success('Logged out');
   },
 
@@ -186,9 +191,9 @@ export const useAuthStore = create<AuthStore>()((set, get) => ({
     const current = get().user;
     if (!current) return;
 
-    if (isSupabaseEnabled() && updates.name) {
+    if (updates.name) {
       const supabase = await getSupabaseClient();
-      await supabase?.from('profiles').update({ display_name: updates.name }).eq('id', current.id);
+      await supabase.from('profiles').update({ display_name: updates.name }).eq('id', current.id);
     }
 
     set({ user: { ...current, ...updates } });
@@ -203,19 +208,20 @@ export const useAuthStore = create<AuthStore>()((set, get) => ({
     if (!confirmed) return;
     set({ isLoading: true });
 
-    if (isSupabaseEnabled()) {
-      // Supabase requires a service-role call to delete users; sign out instead
-      // and direct the user to contact support, or wire up an Edge Function.
-      const supabase = await getSupabaseClient();
-      await supabase?.auth.signOut();
-      set({ user: null, isLoading: false });
-      toast.error('Account deleted. Contact support to fully remove your data.');
-      return;
+    // Supabase requires a service-role call to delete users; sign out instead
+    // and direct the user to contact support, or wire up an Edge Function.
+    const supabase = await getSupabaseClient().catch(() => null);
+    await supabase?.auth.signOut();
+    clearQueue();
+    clearAllCaches();
+    useSettingsStore.getState().resetStore();
+    try {
+      localStorage.removeItem('liza-app-state');
+    } catch {
+      /* ignore */
     }
-
-    await new Promise((r) => setTimeout(r, 1200));
-    set({ user: null, isLoading: false });
-    toast.error('Account deleted successfully');
+    set({ user: null, userId: null, isLoading: false });
+    toast.error('Account deleted. Contact support to fully remove your data.');
   },
 }));
 

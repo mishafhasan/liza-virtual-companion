@@ -42,18 +42,22 @@ const CATEGORY_META: Record<string, { label: string; icon: string }> = {
 };
 
 /**
- * Extracts the category prefix from a fact string if it was stored with one,
- * e.g. "[personal_info] User lives in Colombo." → 'personal_info'.
- * Returns 'other' for facts without a detectable prefix.
+ * Extracts the category for a memory fact.
+ *
+ * Prefers the structured `category` field on MemoryItem (the modern path). Falls
+ * back to regex-parsing a `[category]` prefix for any legacy facts still carrying
+ * one from before the migration to the `category` column.
  */
-function extractCategory(fact: string): string {
-  const match = fact.match(/^\[([a-z_]+)\]\s*/i);
+function extractCategory(item: MemoryItem): string {
+  if (item.category) return item.category;
+  const match = item.fact.match(/^\[([a-z_]+)\]\s*/i);
   return match ? match[1].toLowerCase() : 'other';
 }
 
 /**
  * Strips a category prefix tag from a fact string for clean display.
- * e.g. "[personal_info] User lives in Colombo." → "User lives in Colombo."
+ * Only relevant for legacy facts still carrying a `[category]` prefix; modern
+ * facts are stored clean.
  */
 function stripCategoryPrefix(fact: string): string {
   return fact.replace(/^\[[a-z_]+\]\s*/i, '').trim();
@@ -85,13 +89,13 @@ function buildMemoryContext(memory: MemoryItem[]): string {
   const uncategorized: string[] = [];
 
   for (const item of recent) {
-    const cat = extractCategory(item.fact);
+    const cat = extractCategory(item);
     const cleanFact = stripCategoryPrefix(item.fact);
     if (cat in CATEGORY_META) {
       if (!grouped[cat]) grouped[cat] = [];
       grouped[cat].push(cleanFact);
     } else {
-      uncategorized.push(item.fact);
+      uncategorized.push(cleanFact);
     }
   }
 

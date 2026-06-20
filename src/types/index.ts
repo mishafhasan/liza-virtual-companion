@@ -156,9 +156,27 @@ export interface CharacterProfile {
   tone?: string;
 }
 
+/**
+ * Memory categories used by the extraction AI and stored in the `memories`
+ * table's `category` column. Kept in sync with the union in
+ * conversationService.ts (MemoryFact['category']).
+ */
+export type MemoryCategory =
+  | 'personal_info'    // name, age, location, nationality
+  | 'preference'       // likes, dislikes, hobbies, favourites
+  | 'life_event'       // milestones, major events, experiences
+  | 'goal'             // plans, aspirations, things they want
+  | 'work_context'     // job, study, career, projects
+  | 'emotion_pattern'  // recurring moods, emotional tendencies
+  | 'relationship'     // family, friends, romantic life
+  | 'other';           // legacy / uncategorized facts
+
 export interface MemoryItem {
   id: string;
+  /** Clean fact text, never prefixed with a category tag. */
   fact: string;
+  /** Category from the extraction AI (or 'other' for legacy/manual facts). */
+  category?: MemoryCategory;
 }
 
 export const DEFAULT_SETTINGS: Settings = {

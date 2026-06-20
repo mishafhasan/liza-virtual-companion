@@ -1,35 +1,52 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { getSupabaseClient, isSupabaseEnabled } from '@/services/supabase/supabaseClient';
-import type { Settings, CharacterProfile, MemoryItem, Language } from '@/types';
+import { getSupabaseClient } from '@/services/supabase/supabaseClient';
+import { useAuthStore } from '@/stores/authStore';
+import { embedAndStoreMemory } from '@/services/supabase/conversationService';
+import { syncWrite } from '@/services/sync/supabaseQuery';
+import type { Settings, CharacterProfile, MemoryItem, MemoryCategory, Language } from '@/types';
 import { DEFAULT_SETTINGS, DEFAULT_CHARACTER_PROFILE } from '@/constants';
 
 /**
- * Settings store (Zustand).
+ * Settings store (Zustand) — CLOUD-FIRST cache model.
  *
- * When Supabase is configured, settings, character profile, and long-term
- * memories are synced to `user_settings`, `character_profiles`, and `memories`
- * tables respectively (upserted on every change).
- * On first load `loadFromCloud()` is called to hydrate the store from the DB,
- * overriding any stale localStorage values.
+ * Supabase is the single source of truth. This store is a per-user read cache:
+ *   - On login, `loadFromCloud()` hydrates from the DB and OVERRIDES any stale
+ *     localStorage values (including an empty memory list — fixing the bug
+ *     where stale local data masked an empty cloud).
+ *   - On every change, the store updates locally for instant UI, then syncs to
+ *     the cloud via `syncWrite` (which retries on transient failure and queues
+ *     for later replay when offline).
+ *   - On logout, `resetStore()` wipes the cache so the next user starts clean.
  *
- * In local-only mode the `persist` middleware keeps everything in localStorage
- * exactly as before — no behaviour change.
+ * The `persist` middleware keeps a localStorage copy (key `liza-app-state`)
+ * purely as a read cache for fast page loads — it is never authoritative.
  */
 interface SettingsStore {
   settings: Settings;
   characterProfile: CharacterProfile;
   memory: MemoryItem[];
-  /** True once the initial cloud load has completed (or Supabase is absent). */
+  /** True once the initial cloud load has completed for the current user. */
   cloudLoaded: boolean;
   /** The last user ID for whom cloud data was loaded. Prevents re-loading on every navigation. */
   lastCloudLoadedUserId: string | null;
   updateSettings: (updates: Partial<Settings>) => Promise<void>;
   updateCharacterProfile: (updates: Partial<CharacterProfile>) => Promise<void>;
+  /** Manual single-fact add (from Settings UI). Embeds + persists to cloud. */
   addMemory: (item: MemoryItem) => void;
+  /** Batch add (from mid-conversation extraction). Cloud write already done by caller. */
+  addMemories: (items: MemoryItem[]) => void;
   deleteMemory: (id: string) => void;
   /** Hydrate store from Supabase — call once after the user is authenticated. */
   loadFromCloud: (userId: string) => Promise<void>;
+  /** Wipe the cache back to defaults — called on logout. */
+  resetStore: () => void;
+}
+
+function requireUserId(): string {
+  const userId = useAuthStore.getState().userId;
+  if (!userId) throw new Error('No authenticated user.');
+  return userId;
 }
 
 export const useSettingsStore = create<SettingsStore>()(
@@ -49,13 +66,7 @@ export const useSettingsStore = create<SettingsStore>()(
           return;
         }
 
-        if (!isSupabaseEnabled()) {
-          set({ cloudLoaded: true, lastCloudLoadedUserId: userId });
-          return;
-        }
-
         const supabase = await getSupabaseClient();
-        if (!supabase) { set({ cloudLoaded: true, lastCloudLoadedUserId: userId }); return; }
 
         // Read first — only upsert if the row is missing. This avoids unnecessary writes.
         const [{ data: settingsRow, error: settingsErr }, { data: characterRow, error: characterErr }, { data: memoriesRows, error: memoriesErr }] = await Promise.all([
@@ -71,7 +82,7 @@ export const useSettingsStore = create<SettingsStore>()(
             .single(),
           supabase
             .from('memories')
-            .select('id, fact, created_at')
+            .select('id, fact, category')
             .eq('user_id', userId)
             .order('created_at', { ascending: true }),
         ]);
@@ -138,9 +149,15 @@ export const useSettingsStore = create<SettingsStore>()(
             avatar: characterRow.avatar_image || get().characterProfile.avatar,
           };
         }
-        if (memoriesRows && memoriesRows.length > 0) {
-          updates.memory = memoriesRows.map((m) => ({ id: m.id, fact: m.fact }));
-        }
+
+        // ALWAYS overwrite the local memory list with the cloud result, even when
+        // empty. Previously the list was left untouched when the query returned no
+        // rows, which let stale localStorage mask an empty cloud on fresh deploys.
+        updates.memory = (memoriesRows ?? []).map((m) => ({
+          id: m.id as string,
+          fact: m.fact as string,
+          category: (m.category as MemoryCategory | null) ?? 'other',
+        }));
 
         set(updates);
       },
@@ -149,25 +166,25 @@ export const useSettingsStore = create<SettingsStore>()(
       updateSettings: async (updates) => {
         set((state) => ({ settings: { ...state.settings, ...updates } }));
 
-        if (!isSupabaseEnabled()) return;
-        const supabase = await getSupabaseClient();
-        if (!supabase) return;
-
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return;
-
+        const userId = requireUserId();
         const merged = get().settings;
-        await supabase.from('user_settings').upsert(
-          {
-            user_id: user.id,
-            language: merged.language,
-            voice_name: merged.voiceName,
-            flirt_intensity: merged.flirtIntensity,
-            emotion_intensity: merged.emotionIntensity,
-            video_mode: merged.videoMode,
-            avatar_id: merged.avatarId ?? 'default',
+        await syncWrite(
+          async () => {
+            const supabase = await getSupabaseClient();
+            await supabase.from('user_settings').upsert(
+              {
+                user_id: userId,
+                language: merged.language,
+                voice_name: merged.voiceName,
+                flirt_intensity: merged.flirtIntensity,
+                emotion_intensity: merged.emotionIntensity,
+                video_mode: merged.videoMode,
+                avatar_id: merged.avatarId ?? 'default',
+              },
+              { onConflict: 'user_id' },
+            );
           },
-          { onConflict: 'user_id' },
+          { dedupeKey: `user_settings:${userId}`, label: 'Could not save settings' },
         );
       },
 
@@ -175,73 +192,93 @@ export const useSettingsStore = create<SettingsStore>()(
       updateCharacterProfile: async (updates) => {
         set((state) => ({ characterProfile: { ...state.characterProfile, ...updates } }));
 
-        if (!isSupabaseEnabled()) return;
-        const supabase = await getSupabaseClient();
-        if (!supabase) return;
-
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return;
-
+        const userId = requireUserId();
         const merged = get().characterProfile;
-        const { error } = await supabase.from('character_profiles').upsert(
-          {
-            user_id: user.id,
-            name: merged.name,
-            personality: merged.personality,
-            avatar_image: merged.avatar ?? null,
+        await syncWrite(
+          async () => {
+            const supabase = await getSupabaseClient();
+            const { error } = await supabase.from('character_profiles').upsert(
+              {
+                user_id: userId,
+                name: merged.name,
+                personality: merged.personality,
+                avatar_image: merged.avatar ?? null,
+              },
+              { onConflict: 'user_id' },
+            );
+            if (error) throw error;
           },
-          { onConflict: 'user_id' },
+          { dedupeKey: `character_profiles:${userId}`, label: 'Could not save profile' },
         );
-        if (error) console.error("Supabase upsert error:", error);
       },
 
-      // ─── Memory (local + cloud sync) ──────────────────────────────────────
+      // ─── Memory (local cache + cloud sync) ────────────────────────────────
       addMemory: (item) => {
+        // Optimistically add to the local cache for instant UI.
         set((state) => ({ memory: [...state.memory, item] }));
 
-        // Fire-and-forget cloud sync
-        if (!isSupabaseEnabled()) return;
-        (async () => {
-          try {
-            const supabase = await getSupabaseClient();
-            if (!supabase) return;
-            const { data: { user } } = await supabase.auth.getUser();
-            if (!user) return;
-            await supabase.from('memories').upsert(
-              { user_id: user.id, fact: item.fact },
-              { onConflict: 'user_id,fact' },
-            );
-          } catch (err) {
-            console.warn('[settingsStore] addMemory cloud sync failed:', (err as Error).message);
-          }
-        })();
+        // Persist to cloud WITH an embedding so the fact becomes RAG-retrievable.
+        // Previously manual adds went in with no embedding, making them invisible to
+        // semantic retrieval. Category defaults to 'other' (no UI picker yet).
+        const userId = requireUserId();
+        const category: MemoryCategory = item.category ?? 'other';
+        syncWrite(
+          async () => {
+            await embedAndStoreMemory(item.fact, 0.5, category);
+          },
+          {
+            dedupeKey: `memory_upsert:${userId}:${item.fact}`,
+            label: 'Could not save memory',
+          },
+        );
+      },
+
+      addMemories: (items) => {
+        // Batch mirror into the local cache. The cloud write was already done by
+        // the caller (summarizeMessageBatch), so this is a local-only update.
+        if (!items.length) return;
+        set((state) => ({ memory: [...state.memory, ...items] }));
       },
 
       deleteMemory: (id) => {
         const item = get().memory.find((m) => m.id === id);
         set((state) => ({ memory: state.memory.filter((m) => m.id !== id) }));
 
-        if (!item || !isSupabaseEnabled()) return;
-        (async () => {
-          try {
+        if (!item) return;
+        const userId = requireUserId();
+        syncWrite(
+          async () => {
             const supabase = await getSupabaseClient();
-            if (!supabase) return;
-            const { data: { user } } = await supabase.auth.getUser();
-            if (!user) return;
-            await supabase.from('memories').delete()
-              .eq('user_id', user.id)
-              .eq('fact', item.fact);
-          } catch (err) {
-            console.warn('[settingsStore] deleteMemory cloud sync failed:', (err as Error).message);
-          }
-        })();
+            const { error } = await supabase
+              .from('memories')
+              .delete()
+              .eq('id', id)
+              .eq('user_id', userId);
+            if (error) throw error;
+          },
+          {
+            dedupeKey: `memory_delete:${userId}:${id}`,
+            label: 'Could not delete memory',
+          },
+        );
+      },
+
+      // ─── Reset (logout) ───────────────────────────────────────────────────
+      resetStore: () => {
+        set({
+          settings: DEFAULT_SETTINGS,
+          characterProfile: DEFAULT_CHARACTER_PROFILE,
+          memory: [],
+          cloudLoaded: false,
+          lastCloudLoadedUserId: null,
+        });
       },
     }),
     {
       name: 'liza-app-state',
       version: 1,
       // Persist lastCloudLoadedUserId so we don't re-fetch on every navigation.
-      // cloudLoaded is NOT persisted so a fresh tab still re-verifies.
+      // cloudLoaded is NOT persisted so a fresh tab still re-verifies against cloud.
       partialize: (state) => ({
         settings: state.settings,
         characterProfile: state.characterProfile,
